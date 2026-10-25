@@ -1,0 +1,23 @@
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+# User data and generated outputs
+data/
+notes/
+reports/
+.cache/
+*.log
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+# Frontend
+node_modules/
+dist/
+*.tsbuildinfo
+# Editor settings
+.vscode/
+.idea/

@@ -1,0 +1,2 @@
+# Install the same locked backend environment from the repository root.
+-r backend/requirements.lock

@@ -1,0 +1,1 @@
+"""Course study application backend."""
