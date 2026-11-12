@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ASSIGNMENT = re.compile(r'^([A-Z][A-Z0-9_]*)=.*$', re.MULTILINE)
 PRIVATE_FIELDS = re.compile(r'(?:API_KEY|TOKEN|SECRET|PASSWORD)$')
 CHOICES = {'CHAT_PROVIDER', 'CHAT_MODEL', 'EMBEDDING_PROVIDER', 'EMBEDDING_MODEL'}
+RETIRED_FIELDS = {'ANSWER_REVIEW', 'WEB_SEARCH_ENABLED'}
 
 
 def read_values(text):
@@ -66,14 +67,16 @@ def run(mode):
     if path.is_symlink():
         raise ValueError('Refusing to replace a symbolic-link .env')
     original = path.read_text(encoding='utf-8-sig').replace('\r\n', '\n') if path.exists() else ''
-    values = read_values(original)
+    original_values = read_values(original)
+    retired = sorted(original_values.keys() & RETIRED_FIELDS)
+    values = {key: value for key, value in original_values.items() if key not in RETIRED_FIELDS}
     expected = render(template, values)
-    # Parse before writing to confirm every existing value survives serialization.
+    # Parse before writing to confirm every retained value survives serialization.
     rendered_values = read_values(expected)
     if any(rendered_values[key] != (value or '') for key, value in values.items()):
         raise ValueError('Value preservation check failed; no file was changed')
     missing = sorted(set(read_values(template)) - set(values))
-    result = {'layout_matches': original == expected, 'missing_keys': missing,
+    result = {'layout_matches': original == expected, 'missing_keys': missing, 'retired_keys': retired,
               'existing_values_preserved': len(values)}
     if mode == 'check':
         return result, int(original != expected)

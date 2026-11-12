@@ -30,8 +30,6 @@ class ModelConfigTests(unittest.TestCase):
         self.assertEqual(config['CHAT_PROVIDER'], '')
         self.assertEqual(config['EMBEDDING_PROVIDER'], '')
         self.assertEqual(config['RERANK_PROVIDER'], 'none')
-        self.assertFalse(config['ANSWER_REVIEW'])
-        self.assertTrue(config['WEB_SEARCH_ENABLED'])
         self.assertEqual(config['RUN_TIMEOUT'], 180)
         with self.assertRaisesRegex(RuntimeError, 'CHAT_PROVIDER'):
             config['get_llm']()

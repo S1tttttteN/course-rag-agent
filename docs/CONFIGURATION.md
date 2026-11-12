@@ -16,7 +16,7 @@ backend/.venv/Scripts/python.exe scripts/env_config.py --sync
 backend/.venv/Scripts/python.exe scripts/env_config.py --check
 ```
 
-首次执行会用模板创建 `.env`；已有文件时保留全部已存在的配置值，只补字段和统一格式，修改前备份到忽略的 `.cache/env-backups/`。未知字段或重复字段会停止同步，避免误删自定义配置。输出只包含字段名、数量和状态，不包含值。
+首次执行会用模板创建 `.env`。已有文件时补齐字段、统一格式，修改前备份到忽略的 `.cache/env-backups/`。除明确废弃的字段外，所有已有配置值都保留。未知字段或重复字段会停止同步。输出只包含字段名、数量和状态，不包含值。
 
 也可首次手动复制 `.env.example` 为 `.env`，但不要覆盖已有文件。编辑后重启后端。系统环境变量优先于 `.env`，所以修改文件后若仍与页面显示不同，应检查启动终端是否设置了同名变量。
 
@@ -44,12 +44,16 @@ Ollama 对话通过 `OLLAMA_BASE_URL` 连接，默认本机通用地址为 `http
 
 `RERANK_PROVIDER=none` 默认关闭。也可选择 `siliconflow / jina / cohere`，配置相应 Key，`RERANK_MODEL` 留空则使用注册表默认模型。缺少 Key 时跳过重排，不阻止基本检索。
 
+## 回答设置
+
+「允许 Agent 联网」和「生成后核对证据」在对话页面的「回答设置」中调整。两项默认关闭，选择保存在当前浏览器，从下一次提问生效。固定 RAG 始终只检索课程资料。
+
+升级后，后端忽略旧的 `ANSWER_REVIEW` 和 `WEB_SEARCH_ENABLED`。需要开启时请在页面重新选择。主动运行 `scripts/env_config.py --sync` 会备份 `.env` 并移除这两个废弃字段。
+
 ## 其他字段
 
 | 字段 | 模板取值/留空含义 |
 | --- | --- |
-| `ANSWER_REVIEW` | `false` 自然讲解；`true` 生成后证据核对 |
-| `WEB_SEARCH_ENABLED` | `true` 允许 Agent 按需联网，`false` 关闭；搜索词可能包含问题或资料信息 |
 | `RUN_TIMEOUT` | 留空按对话服务计算：Ollama 600 秒，其余 180 秒 |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | 500 / 100；修改后已有资料需重新处理才应用新分块 |
 | `TOP_K` | 默认 4，页面可调整，Agent 上限 4 |

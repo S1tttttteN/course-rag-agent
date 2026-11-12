@@ -67,19 +67,18 @@ async def rewrite_query(llm, question, history, callbacks=None):
     )
 
 
-def answer_messages(question, history, sources):
+def answer_messages(question, history, sources, *, answer_review):
     """根据问答模式的审查配置构建模型输入。
 
     Args:
         question: 用户提交的问题正文。
         history: 已完成的历史问答，按时间升序排列。
         sources: 本轮已登记的引用快照。
+        answer_review: 是否要求所有事实有本轮证据支持。
 
     Returns:
         依次包含系统规则、历史问答和本轮问题及资料的消息列表。
     """
-    from app.core.models import ANSWER_REVIEW
-
     messages = [
         SystemMessage(
             content=(
@@ -92,7 +91,7 @@ def answer_messages(question, history, sources):
             )
         )
     ]
-    if not ANSWER_REVIEW:
+    if not answer_review:
         messages = [
             SystemMessage(
                 content=(

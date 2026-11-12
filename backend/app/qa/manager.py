@@ -8,7 +8,7 @@ from traceback import extract_tb, format_list
 from sqlalchemy import select
 
 from app.core.locks import catalog_lock
-from app.core.models import get_llm, ANSWER_REVIEW, RUN_TIMEOUT
+from app.core.models import get_llm, RUN_TIMEOUT
 from app.db.models import Conversation, Document, Run
 from app.db.session import SessionLocal
 from app.qa.rag import answer_messages, rewrite_query, text_content
@@ -136,6 +136,7 @@ class RunManager:
                         bool(run.rerank),
                     )
                     mode = run.mode
+                    web_search, answer_review = run.web_search, run.answer_review
                     history = completed_turns(session, conversation.id, run.id)
                     has_sources = (
                         session.scalar(
@@ -160,6 +161,8 @@ class RunManager:
                         top_k,
                         semantic,
                         rerank,
+                        web_search=web_search,
+                        answer_review=answer_review,
                     )
                     runs.finish(run_id, "completed")
                     return
@@ -181,12 +184,11 @@ class RunManager:
                     "history_turns": len(history),
                     "rewrite_note": rewrite_note,
                     "mode": "rag",
-                    "answer_review": ANSWER_REVIEW,
                 }
                 if not runs.status(run_id, "正在核对参考片段", trace=trace):
                     return
                 sources = runs.snapshot(run_id, result["results"])
-                if not sources and ANSWER_REVIEW:
+                if not sources and answer_review:
                     runs.append(
                         run_id,
                         "当前课程资料中未找到足够依据。请补充相关资料，或换用资料中的关键词重新提问。",
@@ -200,7 +202,7 @@ class RunManager:
                 # 核对模式先缓存模型草稿，只有通过核对的内容才进入前端事件流。
                 async with aclosing(
                     llm.astream(
-                        answer_messages(question, history, sources),
+                        answer_messages(question, history, sources, answer_review=answer_review),
                         config={"callbacks": [usage]},
                     )
                 ) as stream:
@@ -220,13 +222,13 @@ class RunManager:
                             == "length"
                         ):
                             raise AnswerLimit()
-                        if not ANSWER_REVIEW and buffer:
+                        if not answer_review and buffer:
                             if not runs.append(run_id, buffer):
                                 return
                             buffer = ""
                 if not answer_length:
                     raise ValueError("empty model response")
-                if ANSWER_REVIEW:
+                if answer_review:
                     await publish_checked(llm, run_id, question, buffer, sources, usage)
                 buffer = ""
                 runs.finish(run_id, "completed")

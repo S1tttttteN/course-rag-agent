@@ -125,6 +125,7 @@ class AgentTests(unittest.TestCase):
         """
         response = self.client.post(f'{self.path}/runs', json={
             'question': question, 'mode': 'agent', 'semantic': False, 'rerank': False,
+            'answer_review': True,
         })
         self.assertEqual(response.status_code, 202, response.text)
         return response.json()['id']
@@ -142,6 +143,8 @@ class AgentTests(unittest.TestCase):
         self.assertTrue(all(item['status'] == 'completed' for item in answer['run']['trace']['tools']))
         events = self.client.get(f'{self.path}/runs/{run_id}/events').text
         self.assertEqual(events.count('event: tool'), 4)
+        self.assertEqual(answer['run']['trace']['evidence_check']['status'], 'checked')
+        self.assertLess(events.index('正在逐条核对回答依据'), events.index('event: delta'))
         self.assertNotIn('event: tool', self.client.get(f"{self.path}/runs/{run_id}/events?after={answer['run']['last_event_id']}").text)
         self.context.__exit__(None, None, None)
         self.context = shared.TestClient(shared.app)
@@ -269,7 +272,9 @@ class AgentTests(unittest.TestCase):
         base = f'/api/courses/{self.other}/conversations'
         conversation = self.client.post(base, json={}).json()['id']
         with patch('app.qa.agent.get_llm', side_effect=AssertionError('must not call')):
-            self.client.post(f'{base}/{conversation}/runs', json={'question': '课程是什么？', 'mode': 'agent'})
+            self.client.post(f'{base}/{conversation}/runs', json={
+                'question': '课程是什么？', 'mode': 'agent', 'answer_review': True,
+            })
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 detail = self.client.get(f'{base}/{conversation}').json()

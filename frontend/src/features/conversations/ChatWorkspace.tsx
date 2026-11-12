@@ -8,6 +8,22 @@ import type { ChatConfig, Citation, Conversation, ConversationDetail, Run, ToolE
 import { Answer } from './Answer';
 import { SourceDetails } from './SourceDetails';
 
+const answerPreferencesKey = 'course-study-room.answer-preferences';
+const defaultAnswerPreferences = { web_search: false, answer_review: false };
+type AnswerPreferences = typeof defaultAnswerPreferences;
+
+function readAnswerPreferences(): AnswerPreferences {
+  try {
+    const saved = JSON.parse(localStorage.getItem(answerPreferencesKey) ?? 'null');
+    return {
+      web_search: saved?.web_search === true,
+      answer_review: saved?.answer_review === true,
+    };
+  } catch {
+    return defaultAnswerPreferences;
+  }
+}
+
 export function ChatWorkspace({ courseId, courseName }: {courseId: string; courseName: string}) {
   const { conversationId } = useParams();
   const navigate = useNavigate();
@@ -23,6 +39,7 @@ export function ChatWorkspace({ courseId, courseName }: {courseId: string; cours
   const [semantic, setSemantic] = useState(true);
   const [rerank, setRerank] = useState(true);
   const [mode, setMode] = useState<'rag' | 'agent'>('agent');
+  const [answerPreferences, setAnswerPreferences] = useState(readAnswerPreferences);
   const [connectionNote, setConnectionNote] = useState('');
   const [deleting, setDeleting] = useState<Conversation | null>(null);
   const [renaming, setRenaming] = useState<Conversation | null>(null);
@@ -36,6 +53,19 @@ export function ChatWorkspace({ courseId, courseName }: {courseId: string; cours
   const routeRef = useRef(conversationId);
   const citationRequest = useRef(0);
   const active = detail && detail.id === conversationId ? detail.active_run : null;
+  const settingsDisabled = busy || !!active;
+  const webSearch = mode === 'agent' && answerPreferences.web_search;
+  const answerReview = active?.trace.answer_review ?? answerPreferences.answer_review;
+
+  function changeAnswerPreference(key: keyof AnswerPreferences, checked: boolean) {
+    const next = { ...answerPreferences, [key]: checked };
+    setAnswerPreferences(next);
+    try {
+      localStorage.setItem(answerPreferencesKey, JSON.stringify(next));
+    } catch {
+      // Keep the choice for this page if browser storage is unavailable.
+    }
+  }
 
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const refreshList = useCallback(async () => {
@@ -124,7 +154,15 @@ export function ChatWorkspace({ courseId, courseName }: {courseId: string; cours
         const item = await conversationsApi.create(courseId);
         id = item.id;
       }
-      await conversationsApi.ask(courseId, id, question.trim(), topK, semantic, rerank, mode);
+      await conversationsApi.ask(courseId, id, {
+        question: question.trim(),
+        top_k: topK,
+        semantic,
+        rerank,
+        mode,
+        web_search: webSearch,
+        answer_review: answerPreferences.answer_review,
+      });
       if (alive.current && routeRef.current === origin) {
         setDraft('');
         await refreshList();
@@ -174,7 +212,7 @@ export function ChatWorkspace({ courseId, courseName }: {courseId: string; cours
     <aside className="conversation-list" aria-label="本课程对话"><div className="conversation-list-heading"><h2>学习对话</h2><button className="icon-button" onClick={() => void createConversation()} disabled={busy} aria-label="新建对话"><Plus size={18} /></button></div><p>每个问题，都可以接着聊。</p><button className="button secondary new-conversation" onClick={() => void createConversation()} disabled={busy}><Plus size={15} />开启新对话</button>
       <nav>{conversations.map(item => <div className="conversation-entry" key={item.id}><NavLink to={`/courses/${courseId}/conversations/${item.id}`}><MessageSquare size={14} /><span>{item.title}</span></NavLink><div><button className="icon-button" aria-label={`重命名对话${item.title}`} disabled={busy} onClick={() => { setRenaming(item); setTitle(item.title); setActionError(''); }}><Pencil size={12} /></button><button className="icon-button danger" aria-label={`删除对话${item.title}`} disabled={busy} onClick={() => { setDeleting(item); setActionError(''); }}><Trash2 size={12} /></button></div></div>)}</nav>{conversations.length === 0 && <p className="conversation-empty">还没有对话。<br />从右侧的一个问题开始。</p>}
     </aside>
-    <section className="chat-thread"><header className="thread-heading"><div><h2>{detail?.title ?? '与课程资料对话'}</h2><p>围绕「{courseName}」学习，{mode === 'rag' ? '先检索课程资料，再生成回答。' : config ? config.web_search ? '按需查阅课程资料、搜索网络和阅读网页。' : '按需搜索和阅读课程资料。' : '正在读取查阅配置…'}</p></div><Link to={`/courses/${courseId}/documents`} className="text-button"><FileText size={14} />管理资料</Link></header>
+    <section className="chat-thread"><header className="thread-heading"><div><h2>{detail?.title ?? '与课程资料对话'}</h2><p>围绕「{courseName}」学习，{mode === 'rag' ? '先检索课程资料，再生成回答。' : webSearch ? '按需查阅课程资料、搜索网络和阅读网页。' : '按需搜索和阅读课程资料。'}</p></div><Link to={`/courses/${courseId}/documents`} className="text-button"><FileText size={14} />管理资料</Link></header>
       {config && !config.configured && <p className="error" role="alert">{config.note}</p>}
       {error && <div className="error-banner" role="alert"><p>{error}</p><button className="button secondary" onClick={() => { setError(''); void refreshDetail().catch(error => setError(error.message)); }}>重新加载</button></div>}
       <div className="thread-messages" ref={thread} aria-label="对话消息" onScroll={() => { if (thread.current) autoScroll.current = thread.current.scrollHeight - thread.current.scrollTop - thread.current.clientHeight < 90; }}>
@@ -194,8 +232,28 @@ export function ChatWorkspace({ courseId, courseName }: {courseId: string; cours
       </div>
       <div className="composer-area">{active && <p className="run-status" role="status"><LoaderCircle size={13} className="spin" />{active.phase}</p>}{connectionNote && <p className="subtle-note" role="status">{connectionNote}</p>}{actionError && !deleting && !renaming && <p className="error" role="alert">{actionError}</p>}
         <form onSubmit={event => { event.preventDefault(); void send(); }} className="chat-composer"><textarea aria-label="课程问题" placeholder="问一个课程问题，或继续追问…" maxLength={4000} rows={2} value={draft} onChange={event => setDraft(event.target.value)} disabled={busy || !!active || loading || !!error} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} />{active ? <button type="button" className="send-button stop-button" onClick={() => void cancel()} disabled={active.status === 'cancelling'} aria-label="停止回答"><Square size={16} fill="currentColor" /></button> : <button type="submit" className="send-button" disabled={!draft.trim() || busy || loading || !!error} aria-label="发送问题">{busy ? <LoaderCircle size={18} className="spin" /> : <ArrowUp size={20} />}</button>}</form>
-        <div className="mode-picker" role="group" aria-label="回答模式"><button type="button" aria-pressed={mode === 'agent'} disabled={!!active || busy} onClick={() => setMode('agent')}>Agent · 自主查阅</button><button type="button" aria-pressed={mode === 'rag'} disabled={!!active || busy} onClick={() => setMode('rag')}>RAG · 固定检索</button><span>{mode === 'agent' ? config ? config.web_search ? '按需查阅课程资料、搜索网络和阅读网页。' : '按需搜索和阅读课程资料，联网已关闭。' : '正在读取查阅配置…' : '检索一次课程资料后回答，不主动联网。'}</span></div>
-        <div className="composer-foot"><span>{config?.answer_review ? '正文核对后显示' : '回答实时显示'}；有引用时可点击 [n] 核对来源。</span><details className="chat-settings"><summary>回答设置</summary><div><p>{config ? `${config.provider || '未配置'} / ${config.model || '未选择'}` : '读取模型配置…'}</p><label>每次检索片段数 {mode === 'agent' ? Math.min(topK, 4) : topK}<input type="range" min="1" max={mode === 'agent' ? '4' : '10'} value={mode === 'agent' ? Math.min(topK, 4) : topK} disabled={!!active} onChange={event => setTopK(Number(event.target.value))} /></label><label><input type="checkbox" checked={semantic} disabled={!!active} onChange={event => setSemantic(event.target.checked)} />结合语义检索</label><label><input type="checkbox" checked={rerank} disabled={!!active || !config?.rerank_available} onChange={event => setRerank(event.target.checked)} />相关度重排</label></div></details></div>
+        <div className="mode-picker" role="group" aria-label="回答模式"><button type="button" aria-pressed={mode === 'agent'} disabled={settingsDisabled} onClick={() => setMode('agent')}>Agent · 自主查阅</button><button type="button" aria-pressed={mode === 'rag'} disabled={settingsDisabled} onClick={() => setMode('rag')}>RAG · 固定检索</button><span>{mode === 'rag' ? '检索一次课程资料后回答，不主动联网。' : webSearch ? 'Agent 可按需联网。' : 'Agent 联网已关闭。'}</span></div>
+        <div className="composer-foot">
+          <span>{answerReview ? '正文核对后显示' : '回答实时显示'}；有引用时可点击 [n] 核对来源。</span>
+          <details className="chat-settings">
+            <summary>回答设置</summary>
+            <div>
+              <p>{config ? `${config.provider || '未配置'} / ${config.model || '未选择'}` : '读取模型配置…'}</p>
+              <label>每次检索片段数 {mode === 'agent' ? Math.min(topK, 4) : topK}<input type="range" min="1" max={mode === 'agent' ? '4' : '10'} value={mode === 'agent' ? Math.min(topK, 4) : topK} disabled={settingsDisabled} onChange={event => setTopK(Number(event.target.value))} /></label>
+              <label><input type="checkbox" checked={semantic} disabled={settingsDisabled} onChange={event => setSemantic(event.target.checked)} />结合语义检索</label>
+              <label><input type="checkbox" checked={rerank} disabled={settingsDisabled || !config?.rerank_available} onChange={event => setRerank(event.target.checked)} />相关度重排</label>
+              <label>
+                <input type="checkbox" checked={webSearch} disabled={settingsDisabled || mode === 'rag'} aria-describedby="web-search-note" onChange={event => changeAnswerPreference('web_search', event.target.checked)} />
+                允许 Agent 联网
+              </label>
+              <p id="web-search-note">{mode === 'rag' ? '仅 Agent 模式可用。' : '搜索词可能包含问题或资料信息，并发送给搜索服务。'}</p>
+              <label>
+                <input type="checkbox" checked={answerPreferences.answer_review} disabled={settingsDisabled} onChange={event => changeAnswerPreference('answer_review', event.target.checked)} />
+                生成后核对证据
+              </label>
+            </div>
+          </details>
+        </div>
       </div>
     </section>
     {deleting && <Dialog title="删除这段对话？" busy={busy} onClose={() => setDeleting(null)}><p className="dialog-description">「{deleting.title}」的消息与引用快照会一并删除，正在生成的回答也会停止。课程资料不受影响，此操作无法撤销。</p>{actionError && <p className="error" role="alert">{actionError}</p>}<div className="dialog-actions"><button className="button secondary" disabled={busy} onClick={() => setDeleting(null)}>保留对话</button><button className="button destructive" disabled={busy} onClick={() => void deleteConversation()}>确认删除对话</button></div></Dialog>}

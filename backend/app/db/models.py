@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text, UniqueConstraint, false, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -201,6 +201,8 @@ class Run(Base):
         top_k: 检索候选条数。
         semantic: 语义检索开关，以整数保存。
         rerank: 重排序开关，以整数保存。
+        web_search: 本轮是否允许 Agent 联网。
+        answer_review: 本轮是否在发布正文前核对证据。
         created_at: 创建时间。
     """
 
@@ -229,6 +231,8 @@ class Run(Base):
     top_k: Mapped[int] = mapped_column(Integer, default=4)
     semantic: Mapped[int] = mapped_column(Integer, default=1)
     rerank: Mapped[int] = mapped_column(Integer, default=1)
+    web_search: Mapped[bool] = mapped_column(Boolean, server_default=false())
+    answer_review: Mapped[bool] = mapped_column(Boolean, server_default=false())
     created_at: Mapped[str] = mapped_column(String(40), default=utc_now)
 
 

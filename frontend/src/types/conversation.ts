@@ -9,7 +9,7 @@ export interface Citation {
 export interface Run {
   id: string; conversation_id: string; question: string; query: string; mode: 'rag' | 'agent'; status: RunStatus;
   phase: string; error: string; created_at: string; last_event_id: number;
-  trace: {note?: string; rewrite_note?: string; unknown_citations?: number[]; semantic?: boolean; reranked?: boolean; tools?: ToolExecution[]; tool_limit?: number;
+  trace: {note?: string; rewrite_note?: string; unknown_citations?: number[]; semantic?: boolean; reranked?: boolean; tools?: ToolExecution[]; tool_limit?: number; answer_review?: boolean;
     evidence_check?: {status: 'checking' | 'checked' | 'unavailable' | 'interrupted'; claims?: number; kept?: number; rejected?: Record<string, number>; insufficient?: boolean}};
 }
 export interface ToolExecution {
@@ -22,3 +22,12 @@ export interface ChatMessage {
 }
 export interface ConversationDetail extends Conversation { messages: ChatMessage[]; active_run: Run | null }
 export interface ChatConfig { provider: string; model: string; configured: boolean; note: string; top_k: number; rerank_available: boolean; mode: 'rag' | 'agent'; answer_review: boolean; web_search: boolean }
+export interface QuestionInput {
+  question: string;
+  top_k: number;
+  semantic: boolean;
+  rerank: boolean;
+  mode: 'rag' | 'agent';
+  web_search: boolean;
+  answer_review: boolean;
+}

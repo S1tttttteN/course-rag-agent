@@ -9,8 +9,6 @@ from uuid import uuid4
 
 _temporary = tempfile.TemporaryDirectory()
 os.environ["COURSE_AGENT_DATA_DIR"] = _temporary.name
-os.environ['ANSWER_REVIEW'] = 'true'  # This suite covers evidence-review mode.
-os.environ['WEB_SEARCH_ENABLED'] = 'false'  # Deterministic course-only fixtures never access the web.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402

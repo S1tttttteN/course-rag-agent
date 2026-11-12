@@ -176,7 +176,9 @@ class ConversationTests(unittest.TestCase):
         Returns:
             已接受的运行 ID。
         """
-        response = self.client.post(f'{self.path}/runs', json={'question': question, 'semantic': False, 'rerank': False})
+        response = self.client.post(f'{self.path}/runs', json={
+            'question': question, 'semantic': False, 'rerank': False, 'answer_review': True,
+        })
         self.assertEqual(response.status_code, 202, response.text)
         return response.json()['id']
 
@@ -213,6 +215,7 @@ class ConversationTests(unittest.TestCase):
         ids = [int(value) for value in re.findall(r'^id: (\d+)', stream, re.M)]
         self.assertEqual(ids, sorted(set(ids)))
         self.assertIn('event: delta', stream)
+        self.assertLess(stream.index('正在逐条核对回答依据'), stream.index('event: delta'))
         self.assertIn('event: done', stream)
         self.assertNotIn('event: delta', self.client.get(f'{self.path}/runs/{run_id}/events?after={ids[-1]}').text)
         citation_id = answer['citations'][0]['id']
@@ -319,7 +322,9 @@ class ConversationTests(unittest.TestCase):
         other_base = f'/api/courses/{self.other}/conversations'
         conversation = self.client.post(other_base, json={}).json()['id']
         with patch('app.qa.manager.get_llm', side_effect=AssertionError('must not call')):
-            self.client.post(f'{other_base}/{conversation}/runs', json={'question': '为什么？', 'semantic': False})
+            self.client.post(f'{other_base}/{conversation}/runs', json={
+                'question': '为什么？', 'semantic': False, 'answer_review': True,
+            })
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 detail = self.client.get(f'{other_base}/{conversation}').json()
@@ -330,7 +335,9 @@ class ConversationTests(unittest.TestCase):
         self.assertIn('未找到足够依据', detail['messages'][1]['content'])
         self.assertEqual(detail['messages'][1]['citations'], [])
         with patch('app.qa.manager.get_llm', side_effect=AssertionError('must not call')):
-            self.client.post(f'{other_base}/{conversation}/runs', json={'question': '还有呢？', 'semantic': False})
+            self.client.post(f'{other_base}/{conversation}/runs', json={
+                'question': '还有呢？', 'semantic': False, 'answer_review': True,
+            })
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 detail = self.client.get(f'{other_base}/{conversation}').json()

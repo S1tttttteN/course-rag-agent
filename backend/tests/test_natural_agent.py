@@ -10,7 +10,6 @@ from langchain_core.outputs import ChatGenerationChunk
 
 from test_agent import ScriptedModel, call
 import test_conversations as shared
-from app.qa import agent
 from app.repositories.conversations import completed_turns
 from app.db.session import SessionLocal
 
@@ -96,31 +95,27 @@ class NaturalAgentTests(unittest.TestCase):
     tearDown = shared.ConversationTests.tearDown
 
     def setUp(self):
-        """关闭严格核对，安装网络工具替身，并创建对话测试数据。"""
-        for target, value in (
-            ('app.core.models.ANSWER_REVIEW', False), ('app.qa.manager.ANSWER_REVIEW', False),
-            ('app.qa.agent.ANSWER_REVIEW', False), ('app.qa.agent.WEB_SEARCH_ENABLED', True),
-        ):
-            self.enterContext(patch(target, value))
+        """安装网络工具替身并创建对话测试数据。"""
         # Unexpected network/cloud activity is a hard test failure.
         self.web_search = self.enterContext(patch('app.qa.agent.web_search', side_effect=AssertionError('unexpected web search')))
         self.web_read = self.enterContext(patch('app.qa.agent.web_read', side_effect=AssertionError('unexpected web read')))
         self.review = self.enterContext(patch('app.qa.agent.publish_checked', side_effect=AssertionError('unexpected strict reviewer')))
         shared.ConversationTests.setUp(self)
 
-    def ask(self, question='请解释一个概念', path=None, mode='agent'):
+    def ask(self, question='请解释一个概念', path=None, mode='agent', **settings):
         """向指定测试对话提交所选模式的问答。
 
         Args:
             question: 用户提交的问题正文。
             path: 可选对话路径，省略时使用当前测试对话。
             mode: 问答模式，取值为 rag 或 agent。
+            settings: 随提问提交的可选回答设置。
 
         Returns:
             已接受的运行 ID。
         """
         response = self.client.post(f'{path or self.path}/runs', json={
-            'question': question, 'mode': mode, 'semantic': False, 'rerank': False})
+            'question': question, 'mode': mode, 'semantic': False, 'rerank': False, **settings})
         self.assertEqual(response.status_code, 202, response.text)
         return response.json()['id']
 
@@ -135,7 +130,7 @@ class NaturalAgentTests(unittest.TestCase):
         self.assertEqual(answer['content'], model.responses[0].content)
         self.assertEqual(answer['citations'], [])
         self.assertFalse(answer['run']['trace']['answer_review'])
-        self.assertTrue(answer['run']['trace']['web_search'])
+        self.assertFalse(answer['run']['trace']['web_search'])
         self.review.assert_not_called()
         self.web_search.assert_not_called()
 
@@ -150,13 +145,14 @@ class NaturalAgentTests(unittest.TestCase):
             call('search_web', {'query': '公开教学实验'}), call('search_web', {'query': '公开教学实验'}),
             call('read_webpage', {'url': URL}), AIMessage(content=text)])
         with patch('app.qa.agent.get_llm', return_value=model):
-            run_id = self.ask('结合当前课程资料与公开网页讲解')
+            run_id = self.ask('结合当前课程资料与公开网页讲解', web_search=True)
             answer = self.wait(run_id)
         self.assertEqual(answer['status'], 'completed')
         self.assertEqual(answer['content'], text)  # Streaming must not duplicate final content.
         self.assertEqual([item['number'] for item in answer['citations']], [1, 2, 3])
         self.assertEqual([item['kind'] for item in answer['citations']], ['course', 'web_snippet', 'web_page'])
         self.assertEqual(len(answer['run']['trace']['tools']), 4)
+        self.assertTrue(answer['run']['trace']['web_search'])
         citation = answer['citations'][-1]
         self.assertTrue(citation['retrieved_at'])
         stream = self.client.get(f'{self.path}/runs/{run_id}/events').text
@@ -178,7 +174,7 @@ class NaturalAgentTests(unittest.TestCase):
         model = StreamingModel(responses=[call('search_web', {'query': '公开知识'}),
             AIMessage(content='网络暂不可用；以下是一般知识补充，尚未核对网页。')])
         with patch('app.qa.agent.get_llm', return_value=model):
-            answer = self.wait(self.ask())
+            answer = self.wait(self.ask(web_search=True))
         self.assertEqual(answer['status'], 'completed')
         self.assertEqual(answer['run']['trace']['tools'][0]['status'], 'failed')
         self.assertEqual(answer['citations'], [])
@@ -193,18 +189,29 @@ class NaturalAgentTests(unittest.TestCase):
             call('read_document', {'document_id': foreign['id'], 'version_id': foreign['latest']['id']}),
             AIMessage(content='未读取到所需资料。')])
         with patch('app.qa.agent.get_llm', return_value=model):
-            answer = self.wait(self.ask())
+            answer = self.wait(self.ask(web_search=True))
         self.assertEqual(answer['status'], 'completed')
         self.web_read.assert_not_called()
         self.assertTrue(all(row['status'] == 'failed' for row in answer['run']['trace']['tools']))
         self.assertNotIn('隔离样例正文', str(model.seen))
         self.assertEqual(answer['citations'], [])
 
-    def test_disabled_web_tools_are_not_bound(self):
-        """验证关闭网络功能时只绑定课程工具。"""
-        with patch('app.qa.agent.WEB_SEARCH_ENABLED', False):
-            names = {item.name for item in agent.CourseTools(None, '', self.course, 4, False, False).build_tools()}
-        self.assertEqual(names, {'search_course', 'list_documents', 'read_document'})
+    def test_agent_does_not_carry_web_permission_between_questions(self):
+        """上一轮允许联网时，下一轮省略选项仍不提供网络工具。"""
+        enabled = StreamingModel(responses=[AIMessage(content='第一轮回答。')])
+        disabled = StreamingModel(responses=[AIMessage(content='第二轮回答。')])
+        with patch('app.qa.agent.get_llm', side_effect=[enabled, disabled]), patch.object(
+            StreamingModel, 'bind_tools', autospec=True, side_effect=StreamingModel.bind_tools
+        ) as bind_tools:
+            first = self.wait(self.ask(web_search=True))
+            second = self.wait(self.ask())
+        self.assertEqual(first['status'], 'completed')
+        self.assertEqual(second['status'], 'completed')
+        self.assertTrue(first['run']['trace']['web_search'])
+        self.assertFalse(second['run']['trace']['web_search'])
+        first_tools, second_tools = ({tool.name for tool in call.args[1]} for call in bind_tools.call_args_list)
+        self.assertEqual(first_tools - second_tools, {'search_web', 'read_webpage'})
+        self.assertEqual(second_tools, {'search_course', 'list_documents', 'read_document'})
 
     def test_cancel_preserves_streamed_text_and_excludes_incomplete_history(self):
         """验证取消保留已发布正文，并从历史上下文排除未完成问答。"""
@@ -233,12 +240,22 @@ class NaturalAgentTests(unittest.TestCase):
         self.assertNotIn('private-provider-error-fixture', json.dumps(answer))
 
     def test_rag_also_streams_without_strict_review(self):
-        """验证关闭严格核对时固定 RAG 也会流式发布正文。"""
+        """验证固定 RAG 可逐轮切换证据核对，且忽略联网请求。"""
+        with patch('app.qa.manager.get_llm', return_value=shared.FakeLLM()):
+            reviewed = self.wait(self.ask('进程是什么？', mode='rag', answer_review=True))
+        self.assertEqual(reviewed['run']['trace']['evidence_check']['status'], 'checked')
         with patch('app.qa.manager.get_llm', return_value=shared.FakeLLM(answer='课程说明。[1] 补充说明：可用例子帮助理解。')):
-            answer = self.wait(self.ask('进程是什么？', mode='rag'))
+            run_id = self.ask('能举例吗？', mode='rag', web_search=True)
+            answer = self.wait(run_id)
         self.assertEqual(answer['status'], 'completed')
         self.assertIn('补充说明', answer['content'])
         self.assertFalse(answer['run']['trace']['answer_review'])
+        self.assertFalse(answer['run']['trace']['web_search'])
+        events = self.client.get(f'{self.path}/runs/{run_id}/events').text
+        self.assertGreater(events.count('event: delta'), 1)
+        self.assertNotIn('正在逐条核对回答依据', events)
+        self.web_search.assert_not_called()
+        self.web_read.assert_not_called()
 
     def test_budget_limits_web_calls_and_finalizes_without_more_tools(self):
         """验证网络工具受统一调用预算约束，并在预算耗尽后结束本轮。"""
@@ -247,7 +264,7 @@ class NaturalAgentTests(unittest.TestCase):
         model = StreamingModel(responses=[call('search_web', {'query': '公开实验'}),
             call('search_web', {'query': '公开实验'}), AIMessage(content='根据已有资料总结。[1]')])
         with patch('app.qa.agent.get_llm', return_value=model), patch('app.qa.agent.MAX_CALLS', 1):
-            answer = self.wait(self.ask())
+            answer = self.wait(self.ask(web_search=True))
         self.assertEqual(answer['status'], 'completed')
         self.assertEqual(self.web_search.call_count, 1)
         self.assertEqual(len(answer['run']['trace']['tools']), 1)

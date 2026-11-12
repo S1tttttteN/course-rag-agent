@@ -342,7 +342,8 @@ def event(session, run_id, kind, data):
 
 
 def create_run(
-    session, course_id, conversation_id, question, top_k, semantic, rerank, mode="rag"
+    session, course_id, conversation_id, question, top_k, semantic, rerank, mode="rag",
+    *, web_search=False, answer_review=False,
 ):
     """提交问答运行、两条消息和初始事件。
 
@@ -355,6 +356,8 @@ def create_run(
         semantic: 是否启用向量检索。
         rerank: 是否启用候选片段重排序。
         mode: 问答模式，取值为 rag 或 agent。
+        web_search: 是否允许 Agent 使用网络工具。
+        answer_review: 是否在发布正文前核对证据。
 
     Returns:
         新运行的摘要，包含队列状态和最后事件 ID。
@@ -372,6 +375,7 @@ def create_run(
         )
         if existing:
             raise ConversationError("这段对话正在生成回答，请等待完成或先停止。", 409)
+        web_search = mode == "agent" and web_search
         run = Run(
             id=str(uuid4()),
             conversation_id=conversation_id,
@@ -380,6 +384,9 @@ def create_run(
             semantic=int(semantic),
             rerank=int(rerank),
             mode=mode,
+            web_search=web_search,
+            answer_review=answer_review,
+            trace=json.dumps({"web_search": web_search, "answer_review": answer_review}),
         )
         session.add(run)
         session.flush()

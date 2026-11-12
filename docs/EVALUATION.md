@@ -15,7 +15,7 @@ backend/.venv/Scripts/python.exe backend/evaluation/run.py --output .cache/evalu
 backend/.venv/Scripts/python.exe backend/evaluation/summarize.py .cache/evaluation.json --output .cache/evaluation.md
 ```
 
-先安装 `backend/requirements-dev.txt`。脚本使用独立临时课程库，不使用个人课程；会调用所选对话、嵌入及可选重排服务，可能产生费用。Agent 联网行为遵循配置，纯课程对照时可设置 `WEB_SEARCH_ENABLED=false`。
+先安装 `backend/requirements-dev.txt`。脚本使用独立临时课程库，会调用所选对话、嵌入及可选重排服务，可能产生费用。默认关闭证据核对和 Agent 联网。用 `--answer-review` 为两种模式开启证据核对，用 `--web-search` 允许 Agent 联网。
 
 报告记录模型、参数、运行结果、来源、用量及耗时。词组覆盖和编号检查不能当作事实正确率，需要人工核对来源支持、完整性及解释质量。报告可能包含模型输出与环境信息，默认不提交，分享前自行审核。
 

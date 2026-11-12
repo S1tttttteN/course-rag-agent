@@ -14,7 +14,7 @@ from langgraph.errors import GraphRecursionError
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
-from app.core.models import get_llm, ANSWER_REVIEW, WEB_SEARCH_ENABLED
+from app.core.models import get_llm
 from app.db.models import Document, DocumentVersion
 from app.db.session import SessionLocal
 from app.qa.rag import answer_messages, text_content
@@ -293,8 +293,11 @@ class CourseTools(AgentMiddleware):
             if (row["url"], row["kind"]) in wanted
         ]
 
-    def build_tools(self):
+    def build_tools(self, *, web_search_enabled):
         """构建绑定当前课程和运行的模型工具。
+
+        Args:
+            web_search_enabled: 本轮是否允许搜索和阅读网页。
 
         Returns:
             课程检索、目录和阅读工具，以及配置启用时的网络工具。
@@ -423,7 +426,7 @@ class CourseTools(AgentMiddleware):
             )
 
         tools = [search_course, list_documents, read_document]
-        if WEB_SEARCH_ENABLED:
+        if web_search_enabled:
             tools.extend([search_web, read_webpage])
         return tools
 
@@ -532,7 +535,7 @@ STRICT_SYSTEM = """你是课程资料助手，通过工具自主查阅当前课�
 
 SYSTEM = """你是一位耐心、会讲解的课程学习助手。根据用户的问题自主选择合适的方法，不必每个问题都调用工具。
 课程笔记、指定课件或‘这门课’的具体问题优先查当前课程资料，必要时多次搜索、列目录或分页阅读。
-资料不够、用户要求课外拓展或最新信息时，可以搜索公开网络，并阅读搜索结果中的网页；优先官方文档、大学及可靠原始来源。
+本轮提供网络工具时，可在资料不足或用户需要拓展、最新信息时查阅公开网络；优先官方文档、大学及可靠原始来源。
 可以用自身知识解释概念、推导、举例、类比和给出学习建议，不要因为课件没写就拒绝讲解。
 自然回答用户的实际问题，按需要用段落、小标题、对比表或例子；不强制短句列表，不添加机械的核对报告。
 区分信息来源：引用课程资料或网络来源时使用工具返回的[n]；课外资料应自然标明‘补充说明’或‘网络参考’，不要说成课件原文。
@@ -542,7 +545,8 @@ SYSTEM = """你是一位耐心、会讲解的课程学习助手。根据用户�
 
 
 async def execute_agent(
-    manager, run_id, course_id, question, history, top_k, semantic, rerank
+    manager, run_id, course_id, question, history, top_k, semantic, rerank,
+    *, web_search, answer_review,
 ):
     """执行 Agent 模式问答并按审查配置发布正文。
 
@@ -555,6 +559,8 @@ async def execute_agent(
         top_k: 最多返回的候选片段数。
         semantic: 是否启用向量检索。
         rerank: 是否启用候选片段重排序。
+        web_search: 是否允许本轮使用网络工具。
+        answer_review: 是否在发布正文前核对证据。
     """
     context = CourseTools(manager, run_id, course_id, top_k, semantic, rerank)
     trace = {
@@ -563,8 +569,6 @@ async def execute_agent(
         "tool_limit": MAX_CALLS,
         "tool_timeout_seconds": TOOL_TIMEOUT,
         "tools": [],
-        "answer_review": ANSWER_REVIEW,
-        "web_search": WEB_SEARCH_ENABLED,
     }
     if not runs.status(run_id, "正在查阅课程资料", trace=trace, query=question):
         return
@@ -577,16 +581,16 @@ async def execute_agent(
             )
             is not None
         )
-    if ANSWER_REVIEW and not has_documents and not WEB_SEARCH_ENABLED:
+    if answer_review and not has_documents and not web_search:
         runs.append(run_id, GAP)
         return
     model = get_llm()
     usage = RunUsage(run_id)
     agent = create_agent(
         model=model,
-        tools=context.build_tools(),
+        tools=context.build_tools(web_search_enabled=web_search),
         middleware=[context],
-        system_prompt=STRICT_SYSTEM if ANSWER_REVIEW else SYSTEM,
+        system_prompt=STRICT_SYSTEM if answer_review else SYSTEM,
     )
     messages = []
     for turn in history:
@@ -612,7 +616,7 @@ async def execute_agent(
             async for kind, update in stream:
                 if kind == "messages":
                     chunk, metadata = update
-                    if not ANSWER_REVIEW and metadata.get("langgraph_node") == "model":
+                    if not answer_review and metadata.get("langgraph_node") == "model":
                         text = text_content(chunk)
                         if text:
                             current_turn_streamed = True
@@ -638,7 +642,7 @@ async def execute_agent(
                                 raise ValueError("model output truncated")
                             answer = text_content(message)
                             if (
-                                not ANSWER_REVIEW
+                                not answer_review
                                 and not current_turn_streamed
                                 and answer
                             ):
@@ -647,23 +651,26 @@ async def execute_agent(
                                 if not runs.append(run_id, answer):
                                     return
                                 published_length += len(answer)
-                            if not ANSWER_REVIEW:
+                            if not answer_review:
                                 final_published = True
                         if isinstance(message, AIMessage):
                             current_turn_streamed = False
     except (BudgetExceeded, GraphRecursionError):
         # One final call without tools, so a looping agent cannot spend beyond its budget.
-        if context.sources or not ANSWER_REVIEW:
+        if context.sources or not answer_review:
             limited = True
             runs.status(run_id, "已达查阅上限，正在整理已有依据")
-            if not ANSWER_REVIEW:
+            if not answer_review:
                 runs.append(
                     run_id, "\n\n> 已到本轮查阅上限，接下来根据现有资料整理。\n\n"
                 )
             length = 0
             async with aclosing(
                 model.astream(
-                    answer_messages(question, history, list(context.sources.values())),
+                    answer_messages(
+                        question, history, list(context.sources.values()),
+                        answer_review=answer_review,
+                    ),
                     config={"callbacks": [usage]},
                 )
             ) as stream:
@@ -678,15 +685,15 @@ async def execute_agent(
                     ):
                         raise ValueError("model output truncated")
                     answer += text
-                    if not ANSWER_REVIEW and not runs.append(run_id, text):
+                    if not answer_review and not runs.append(run_id, text):
                         return
-                    if not ANSWER_REVIEW and text:
+                    if not answer_review and text:
                         final_published = True
             if not length:
                 raise ValueError("empty model response")
         else:
             answer = "已达到本轮查阅上限。" + GAP
-    if ANSWER_REVIEW and not context.sources:
+    if answer_review and not context.sources:
         # Fail closed if the model skips retrieval. Directory metadata has its own deterministic answer.
         answer = (
             "本轮查阅到的课程资料：\n\n"
@@ -702,7 +709,7 @@ async def execute_agent(
         raise ValueError("empty model response")
     if len(answer) > 20000:
         raise ValueError("model output too long")
-    if ANSWER_REVIEW and context.sources:
+    if answer_review and context.sources:
         await publish_checked(
             model,
             run_id,
@@ -713,5 +720,5 @@ async def execute_agent(
             context.catalog_items,
             limited,
         )
-    elif ANSWER_REVIEW or not final_published:
+    elif answer_review or not final_published:
         runs.append(run_id, answer)

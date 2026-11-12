@@ -16,8 +16,6 @@ from app.core.models import (
     CHAT_PROVIDER,
     CHAT_PROVIDERS,
     TOP_K,
-    ANSWER_REVIEW,
-    WEB_SEARCH_ENABLED,
     OLLAMA_BASE_URL,
     chat_provider_conf,
     _get_api_key,
@@ -65,6 +63,8 @@ class QuestionInput(BaseModel):
         semantic: 是否启用语义检索，默认启用。
         rerank: 是否对检索结果重排序，默认启用。
         mode: 问答模式，可选 `rag` 或 `agent`，默认为 `rag`。
+        web_search: 是否允许本轮 Agent 联网，默认关闭。
+        answer_review: 是否在发布本轮正文前核对证据，默认关闭。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -75,6 +75,8 @@ class QuestionInput(BaseModel):
     semantic: bool = True
     rerank: bool = True
     mode: Literal["rag", "agent"] = "rag"
+    web_search: bool = Field(default=False, strict=True)
+    answer_review: bool = Field(default=False, strict=True)
 
 
 @router.get("/chat/config")
@@ -116,8 +118,8 @@ def chat_config():
         "top_k": min(10, max(1, TOP_K)),
         "rerank_available": is_available(),
         "mode": "agent",
-        "answer_review": ANSWER_REVIEW,
-        "web_search": WEB_SEARCH_ENABLED,
+        "answer_review": False,
+        "web_search": False,
     }
 
 
@@ -266,6 +268,8 @@ async def create_run(
         body.semantic,
         body.rerank,
         body.mode,
+        web_search=body.web_search,
+        answer_review=body.answer_review,
     )
     # 运行记录提交后再启动任务，前端可用返回的 ID 单独订阅进度。
     request.app.state.runs.start(result["id"])
