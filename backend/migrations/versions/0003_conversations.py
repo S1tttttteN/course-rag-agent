@@ -9,6 +9,7 @@ depends_on = None
 
 
 def upgrade():
+    """创建对话、运行、消息、引用和事件表。"""
     op.create_table("conversations",
         sa.Column("id", sa.String(36), primary_key=True),
         sa.Column("course_id", sa.String(36), sa.ForeignKey("courses.id", ondelete="CASCADE"), nullable=False),
@@ -66,5 +67,6 @@ def upgrade():
 
 
 def downgrade():
+    """按依赖顺序移除问答相关表。"""
     for table in ("run_events", "citations", "messages", "runs", "conversations"):
         op.drop_table(table)

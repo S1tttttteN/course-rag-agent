@@ -1,6 +1,6 @@
 # 已知依赖风险
 
-本版本锁定依赖见 `backend/requirements.lock` 与 `frontend/package-lock.json`。漏洞信息会变化，应在安装和部署前复查。
+项目的依赖版本见 `backend/requirements.lock` 与 `frontend/package-lock.json`。漏洞信息会变化，应在安装和部署前复查。
 
 ## Chroma
 

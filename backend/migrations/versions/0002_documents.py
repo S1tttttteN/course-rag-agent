@@ -9,6 +9,7 @@ depends_on = None
 
 
 def upgrade():
+    """创建资料、版本、片段和存储清理任务表。"""
     op.create_table("documents",
         sa.Column("id", sa.String(36), primary_key=True),
         sa.Column("course_id", sa.String(36), sa.ForeignKey("courses.id", ondelete="CASCADE"), nullable=False),
@@ -52,5 +53,6 @@ def upgrade():
 
 
 def downgrade():
+    """按依赖顺序移除资料索引及清理任务表。"""
     for table in ("cleanup_jobs", "chunks", "document_versions", "documents"):
         op.drop_table(table)

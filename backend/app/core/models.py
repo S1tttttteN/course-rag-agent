@@ -122,19 +122,41 @@ EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "").strip().lower()
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "").strip()
 RERANK_PROVIDER = os.getenv("RERANK_PROVIDER", "none").strip().lower() or "none"
 RERANK_MODEL = os.getenv("RERANK_MODEL", "").strip()
-OLLAMA_BASE_URL = os.getenv('OLLAMA_BASE_URL', '').strip() or 'http://127.0.0.1:11434'
-OLLAMA_EMBEDDING_BASE_URL = os.getenv('OLLAMA_EMBEDDING_BASE_URL', '').strip() or 'http://127.0.0.1:11434/v1'
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "").strip() or "http://127.0.0.1:11434"
+OLLAMA_EMBEDDING_BASE_URL = (
+    os.getenv("OLLAMA_EMBEDDING_BASE_URL", "").strip() or "http://127.0.0.1:11434/v1"
+)
 # ===== 检索与分块参数 =====
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
-TOP_K = int(os.getenv("TOP_K", "4"))            # 最终交给模型的片段数
+TOP_K = int(os.getenv("TOP_K", "4"))  # 最终交给模型的片段数
 ANSWER_REVIEW = os.getenv("ANSWER_REVIEW", "false").lower() in {"true", "1", "yes"}
-WEB_SEARCH_ENABLED = os.getenv("WEB_SEARCH_ENABLED", "true").lower() in {"true", "1", "yes"}
-RUN_TIMEOUT = int(os.getenv("RUN_TIMEOUT", "").strip() or ("600" if CHAT_PROVIDER == "ollama" else "180"))
+WEB_SEARCH_ENABLED = os.getenv("WEB_SEARCH_ENABLED", "true").lower() in {
+    "true",
+    "1",
+    "yes",
+}
+RUN_TIMEOUT = int(
+    os.getenv("RUN_TIMEOUT", "").strip()
+    or ("600" if CHAT_PROVIDER == "ollama" else "180")
+)
 
 
 def _get_provider_conf(name: str, registry: dict, kind: str) -> dict:
-    """根据名称查找服务商配置，找不到时给出可选列表。"""
+    """根据名称查找服务商配置，找不到时给出可选列表。
+
+    Args:
+        name: 配置中选择的服务商名称。
+        registry: 按名称索引的服务商配置。
+        kind: 用于诊断的模型类型名称。
+
+    Returns:
+        所选服务商的配置字典。
+
+    Raises:
+        RuntimeError: 未配置服务商。
+        ValueError: 服务商名称未注册。
+    """
     if not name:
         variable = "CHAT_PROVIDER" if kind == "对话模型" else "EMBEDDING_PROVIDER"
         raise RuntimeError(f"{kind}尚未配置，需要在 .env 中配置 {variable}。")
@@ -146,21 +168,55 @@ def _get_provider_conf(name: str, registry: dict, kind: str) -> dict:
 
 
 def chat_provider_conf() -> dict:
+    """验证对话模型服务商配置。
+
+    Returns:
+        当前服务商的配置字典。
+
+    Raises:
+        RuntimeError: 未配置服务商，或未指定 Ollama 模型标签。
+        ValueError: 服务商名称未知。
+    """
     conf = _get_provider_conf(CHAT_PROVIDER, CHAT_PROVIDERS, "对话模型")
-    if CHAT_PROVIDER == 'ollama' and not CHAT_MODEL:
-        raise RuntimeError('本地对话模型需要在 .env 中配置 CHAT_MODEL，使用 ollama list 中已安装的完整模型标签。')
+    if CHAT_PROVIDER == "ollama" and not CHAT_MODEL:
+        raise RuntimeError(
+            "本地对话模型需要在 .env 中配置 CHAT_MODEL，使用 ollama list 中已安装的完整模型标签。"
+        )
     return conf
 
 
 def embedding_provider_conf() -> dict:
+    """验证嵌入模型服务商配置。
+
+    Returns:
+        当前服务商的配置字典。
+
+    Raises:
+        RuntimeError: 未配置服务商，或未指定 Ollama 模型标签。
+        ValueError: 服务商名称未知。
+    """
     conf = _get_provider_conf(EMBEDDING_PROVIDER, EMBEDDING_PROVIDERS, "嵌入模型")
-    if EMBEDDING_PROVIDER == 'ollama' and not EMBEDDING_MODEL:
-        raise RuntimeError('本地嵌入模型需要在 .env 中配置 EMBEDDING_MODEL，使用已安装的 Ollama 嵌入模型标签。')
+    if EMBEDDING_PROVIDER == "ollama" and not EMBEDDING_MODEL:
+        raise RuntimeError(
+            "本地嵌入模型需要在 .env 中配置 EMBEDDING_MODEL，使用已安装的 Ollama 嵌入模型标签。"
+        )
     return conf
 
 
 def _get_api_key(conf: dict, provider_name: str, kind: str) -> str:
-    """读取服务商密钥；key_env 为 None 的本地服务返回占位符。"""
+    """从环境变量读取服务商密钥。
+
+    Args:
+        conf: 包含密钥环境变量名的服务商配置。
+        provider_name: 用于错误提示的服务商名称。
+        kind: 用于诊断的模型类型名称。
+
+    Returns:
+        已配置的密钥，或无需鉴权时使用的占位字符串。
+
+    Raises:
+        RuntimeError: 所需密钥为空或仍为模板占位符。
+    """
     if conf["key_env"] is None:
         return "not-needed"  # Ollama 不校验密钥，但不能传空
     api_key = os.getenv(conf["key_env"], "").strip()
@@ -175,14 +231,29 @@ def _get_api_key(conf: dict, provider_name: str, kind: str) -> str:
 
 
 def get_llm():
-    """返回当前配置的对话模型。"""
+    """根据当前配置创建对话模型客户端。
+
+    Returns:
+        Ollama 或 OpenAI 兼容的 LangChain 对话客户端。
+
+    Raises:
+        RuntimeError: 缺少必填的服务商、模型标签或密钥。
+        ValueError: 服务商名称未知。
+    """
     conf = chat_provider_conf()
     if CHAT_PROVIDER == "ollama":
         from langchain_ollama import ChatOllama
-        return ChatOllama(model=CHAT_MODEL,
-                          base_url=OLLAMA_BASE_URL,
-                          temperature=0.4, reasoning=False, num_ctx=16384, num_predict=2400,
-                          keep_alive='10m', client_kwargs={'timeout': 180})
+
+        return ChatOllama(
+            model=CHAT_MODEL,
+            base_url=OLLAMA_BASE_URL,
+            temperature=0.4,
+            reasoning=False,
+            num_ctx=16384,
+            num_predict=2400,
+            keep_alive="10m",
+            client_kwargs={"timeout": 180},
+        )
     from langchain_openai import ChatOpenAI
 
     return ChatOpenAI(
@@ -197,14 +268,24 @@ def get_llm():
 
 
 def get_embeddings():
-    """返回当前配置的嵌入模型。"""
+    """根据当前配置创建嵌入模型客户端。
+
+    Returns:
+        访问所配置嵌入端点的 OpenAI 兼容客户端。
+
+    Raises:
+        RuntimeError: 缺少必填的服务商、模型标签或密钥。
+        ValueError: 服务商名称未知。
+    """
     conf = embedding_provider_conf()
     from langchain_openai import OpenAIEmbeddings
 
     return OpenAIEmbeddings(
         model=EMBEDDING_MODEL or conf["default_model"],
         api_key=_get_api_key(conf, EMBEDDING_PROVIDER, "嵌入模型"),
-        base_url=OLLAMA_EMBEDDING_BASE_URL if EMBEDDING_PROVIDER == 'ollama' else conf["base_url"],
+        base_url=OLLAMA_EMBEDDING_BASE_URL
+        if EMBEDDING_PROVIDER == "ollama"
+        else conf["base_url"],
         # 第三方 OpenAI 兼容接口必须关闭，否则会用 tiktoken 报错
         check_embedding_ctx_length=False,
         request_timeout=30,
@@ -214,12 +295,25 @@ def get_embeddings():
 
 
 def embedding_profile() -> str:
+    """生成用于识别向量索引兼容性的嵌入配置标识。
+
+    Returns:
+        形如「服务商:模型」的标识字符串。
+
+    Raises:
+        RuntimeError: 未配置服务商，或未指定 Ollama 模型标签。
+        ValueError: 服务商名称未知。
+    """
     conf = embedding_provider_conf()
     return f"{EMBEDDING_PROVIDER}:{EMBEDDING_MODEL or conf['default_model']}"
 
 
 def get_active_models() -> dict:
-    """返回当前实际生效的服务商与模型名（用户指定优先，否则用服务商默认）。"""
+    """返回当前实际生效的服务商与模型名（用户指定优先，否则用服务商默认）。
+
+    Returns:
+        包含对话和嵌入服务商及其生效模型名的字典。
+    """
     chat_conf = CHAT_PROVIDERS.get(CHAT_PROVIDER, {})
     embed_conf = EMBEDDING_PROVIDERS.get(EMBEDDING_PROVIDER, {})
     return {
@@ -231,7 +325,11 @@ def get_active_models() -> dict:
 
 
 def missing_api_keys() -> list[str]:
-    """启动前检查：返回当前配置下缺失的密钥提示列表。"""
+    """检查已选对话和嵌入服务商的密钥。
+
+    Returns:
+        缺失密钥的配置提示列表。
+    """
     problems = []
     for kind, name, registry in (
         ("对话模型", CHAT_PROVIDER, CHAT_PROVIDERS),
@@ -243,7 +341,5 @@ def missing_api_keys() -> list[str]:
         key_value = os.getenv(conf["key_env"], "").strip()
         # 空值或仍是模板占位符都视为未配置
         if not key_value or "你的" in key_value:
-            problems.append(
-                f"{kind}（{name}）：请在 .env 中填入 {conf['key_env']}"
-            )
+            problems.append(f"{kind}（{name}）：请在 .env 中填入 {conf['key_env']}")
     return problems

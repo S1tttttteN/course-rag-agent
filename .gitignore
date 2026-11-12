@@ -21,3 +21,5 @@ dist/
 # Editor settings
 .vscode/
 .idea/
+#AGENTS.MD
+AGENTS.MD

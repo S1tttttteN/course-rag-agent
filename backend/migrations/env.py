@@ -1,3 +1,5 @@
+"""使用应用数据库引擎执行 Alembic 迁移。"""
+
 from alembic import context
 
 from app.db.models import Base

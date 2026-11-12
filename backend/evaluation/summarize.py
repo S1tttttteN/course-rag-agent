@@ -6,6 +6,7 @@ from statistics import mean, median
 
 
 def main():
+    """读取评测 JSON，并将用量、耗时和检查结果汇总为 Markdown。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('report', type=Path)
     parser.add_argument('--output', type=Path)

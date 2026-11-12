@@ -21,6 +21,15 @@ HERE = Path(__file__).resolve().parent
 
 
 def checks(case, answer):
+    """对一轮回答运行结构和词组覆盖检查。
+
+    Args:
+        case: 包含预期词组、禁出词和缺口要求的用例。
+        answer: 包含正文、引用及运行摘要的助手消息。
+
+    Returns:
+        自动检查项、词组覆盖率和留待填写的人工评分字段。
+    """
     content = answer['content']
     citations = answer['citations']
     groups = case.get('expected_groups', [])
@@ -40,6 +49,17 @@ def checks(case, answer):
 
 def run(args, temporary):
     # Set before importing any app modules. Never use the developer's course database.
+    """使用独立临时数据库运行真实模型的 RAG 与 Agent 对照评测。
+
+    Args:
+        args: 已解析的用例、重复次数、检索选项和输出路径。
+        temporary: 评测专用的数据目录。
+
+    Raises:
+        ValueError: 指定了未知用例 ID。
+        RuntimeError: 评测资料无法索引或不满足分页条件。
+        TimeoutError: 某轮问答超过评测时限。
+    """
     os.environ['COURSE_AGENT_DATA_DIR'] = temporary
     os.environ['CHUNK_SIZE'] = '250'
     os.environ['CHUNK_OVERLAP'] = '40'
@@ -74,6 +94,7 @@ def run(args, temporary):
               'limitations': ['自动词组覆盖不是事实正确率。', '尚未填写人工证据评分，不能据此宣称Agent优于RAG。', '用量仅记录服务商返回数据，不估计费用。']}
 
     def save():
+        """将当前进度和结果写入 JSON 报告。"""
         args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
 
     with TestClient(app) as client:
@@ -143,6 +164,7 @@ def run(args, temporary):
 
 
 def main():
+    """解析命令行选项并在临时数据目录中启动对照评测。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--cases', help='Comma-separated case IDs; default all eight cases')
     parser.add_argument('--repeats', type=int, choices=range(1, 6), default=1)

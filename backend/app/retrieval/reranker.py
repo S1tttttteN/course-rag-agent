@@ -32,10 +32,11 @@ _MAX_CANDIDATES = 100
 def status(rerank_on: bool = None) -> dict:
     """返回重排功能的可用状态，供界面展示。
 
-    参数:
-        rerank_on: 界面开关的状态；不传则只看配置
-    返回:
-        {"enabled": 是否会用重排, "provider": 服务商, "model": 模型名, "reason": 不可用原因}
+    Args:
+        rerank_on: 界面开关状态，为 None 时只检查服务商配置。
+
+    Returns:
+        包含启用状态、服务商、模型名和不可用原因的字典。
     """
     if RERANK_PROVIDER == RERANK_DISABLED:
         return {
@@ -56,7 +57,10 @@ def status(rerank_on: bool = None) -> dict:
         }
 
     model = RERANK_MODEL or conf["default_model"]
-    if conf["key_env"] and (not os.getenv(conf["key_env"], "").strip() or "你的" in os.getenv(conf["key_env"], "")):
+    if conf["key_env"] and (
+        not os.getenv(conf["key_env"], "").strip()
+        or "你的" in os.getenv(conf["key_env"], "")
+    ):
         return {
             "enabled": False,
             "provider": RERANK_PROVIDER,
@@ -73,12 +77,25 @@ def status(rerank_on: bool = None) -> dict:
 
 
 def is_available() -> bool:
-    """重排是否配置可用（不管界面开关）。"""
+    """检查重排服务配置是否可用。
+
+    Returns:
+        服务商及其鉴权配置可用时为 True。
+    """
     return status()["enabled"]
 
 
 def _call_api(query: str, documents: list[str], top_n: int) -> list[dict]:
-    """调用重排接口，返回按相关度降序的 results 列表。"""
+    """调用重排接口，返回按相关度降序的 results 列表。
+
+    Args:
+        query: 用于检索的查询文本。
+        documents: 待重排的原文列表，只发送前 100 条。
+        top_n: 期望返回的候选条数。
+
+    Returns:
+        服务商返回的候选位置与相关度分数记录。
+    """
     conf = RERANK_PROVIDERS[RERANK_PROVIDER]
     url = conf["base_url"].rstrip("/") + "/rerank"
     payload = {
@@ -102,10 +119,17 @@ def _call_api(query: str, documents: list[str], top_n: int) -> list[dict]:
 
 
 def rerank_documents(query: str, docs: list, top_n: int) -> tuple[list, str]:
-    """对候选片段重排，返回 (重排后的片段, 错误信息)。
+    """按服务商的相关度结果重新排列候选片段。
 
-    重排失败时不让整个问答挂掉，而是退回原顺序并返回错误信息。
-    相关度分数会写入 doc.metadata["rerank_score"]，供界面展示。
+    成功时将分数写入片段元数据，失败时保留召回顺序。
+
+    Args:
+        query: 用于检索的查询文本。
+        docs: 待重排的 LangChain 文本片段。
+        top_n: 最多保留的片段数。
+
+    Returns:
+        选中的片段列表与错误说明。成功或没有候选时，说明为空。
     """
     if not docs:
         return docs, ""
@@ -126,7 +150,11 @@ def rerank_documents(query: str, docs: list, top_n: int) -> tuple[list, str]:
             continue
         index = item.get("index")
         score = item.get("relevance_score")
-        if type(index) is not int or not 0 <= index < min(len(docs), _MAX_CANDIDATES) or index in seen:
+        if (
+            type(index) is not int
+            or not 0 <= index < min(len(docs), _MAX_CANDIDATES)
+            or index in seen
+        ):
             continue
         if not isinstance(score, (int, float)) or not math.isfinite(score):
             continue

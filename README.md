@@ -2,7 +2,7 @@
 
 围绕课程资料学习的全栈 Agent 应用。创建课程、上传资料，在独立对话中提问，并通过引用核对课程原文或网络来源。
 
-**版本：0.1.0-alpha.1 · 本地单用户实验版。** 支持 Ollama 和云端模型服务，模型由使用者自行配置。本版本不提供账号、多用户权限或公网托管能力。
+支持 Ollama 和云端模型服务，模型由使用者自行配置。
 
 ## 功能
 
@@ -56,7 +56,7 @@ backend/app/          API、业务服务、Agent、检索与任务处理
 backend/migrations/   数据库迁移
 backend/tests/        确定性回归用例
 backend/evaluation/   虚构示例、评估工具和本地模型检查
-docs/                 当前版本的安装、架构与使用说明
+docs/                 安装、架构与使用说明
 scripts/              配置与仓库内容检查工具
 ```
 
@@ -64,7 +64,7 @@ scripts/              配置与仓库内容检查工具
 
 原文件、索引、对话和引用默认保存到本机 `data/`。选择云端对话、嵌入或重排时，相应文本会发送给所选服务，可能产生费用。开启联网后，搜索服务会收到关键词，目标网站会收到读取请求；关键词可能包含问题或资料信息。
 
-回答可能不准确，来源编号存在也不等于结论必然得到原文支持。Chroma 依赖仍有已知安全公告；本应用仅使用嵌入式本机索引，不启动 Chroma HTTP 服务。本版本不适合直接暴露到公网。参见[安全与隐私](SECURITY.md)和[依赖风险](docs/DEPENDENCIES.md)。
+回答可能不准确，来源编号存在也不等于结论必然得到原文支持。Chroma 依赖仍有已知安全公告；本应用仅使用嵌入式本机索引，不启动 Chroma HTTP 服务。应用不适合直接暴露到公网。参见[安全与隐私](SECURITY.md)和[依赖风险](docs/DEPENDENCIES.md)。
 
 ## 文档
 
@@ -79,6 +79,6 @@ scripts/              配置与仓库内容检查工具
 - [评估工具](docs/EVALUATION.md)
 - [领域术语](GLOSSARY.md)
 - [参与开发](CONTRIBUTING.md)
-- [版本说明](CHANGELOG.md)
+- [开发记录](CHANGELOG.md)
 
 项目代码采用 [MIT](LICENSE)；第三方依赖、模型和资料的授权范围见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

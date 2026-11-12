@@ -13,11 +13,27 @@ from langchain_ollama import ChatOllama
 
 
 async def main(model_name):
+    """使用本地 Ollama 模型验证一次工具调用和最终回答。
+
+    Args:
+        model_name: 本机已安装的 Ollama 模型标签。
+
+    Raises:
+        RuntimeError: 模型未完成预期工具调用或未给出预期结果。
+        TimeoutError: 冒烟检查超过 240 秒。
+    """
     calls = []
 
     @tool
     def lookup_demo_course(topic: str) -> str:
-        """查询虚构课程实验的观察窗口；真实值只存在于此工具中。"""
+        """查询虚构课程实验的观察窗口；真实值只存在于此工具中。
+
+        Args:
+            topic: 需要查找的虚构实验主题。
+
+        Returns:
+            包含预设观察窗口的中文句子。
+        """
         calls.append(topic)
         return '虚构实验的观察窗口为 17 分钟。'
 

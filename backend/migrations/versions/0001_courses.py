@@ -9,6 +9,7 @@ depends_on = None
 
 
 def upgrade():
+    """创建课程目录表。"""
     op.create_table(
         "courses",
         sa.Column("id", sa.String(36), primary_key=True),
@@ -20,4 +21,5 @@ def upgrade():
 
 
 def downgrade():
+    """删除课程目录表。"""
     op.drop_table("courses")

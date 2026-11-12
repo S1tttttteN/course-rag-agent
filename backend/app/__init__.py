@@ -1,1 +1,1 @@
-"""Course study application backend."""
+"""课程研习室后端。"""
