@@ -72,13 +72,13 @@ scripts/              配置与仓库内容检查工具
 - [环境变量与模型配置](docs/CONFIGURATION.md)
 - [使用演示](docs/DEMO.md)
 - [架构与模块](docs/ARCHITECTURE.md)
+- [并排研读设计系统](docs/DESIGN_SYSTEM.md)
 - [课程资料库](docs/LIBRARY.md)
 - [对话、引用与流式运行](docs/CONVERSATIONS.md)
 - [Agent 工具与预算](docs/AGENT.md)
 - [可选证据核对](docs/EVIDENCE_CHECK.md)
 - [评估工具](docs/EVALUATION.md)
 - [领域术语](GLOSSARY.md)
-- [参与开发](CONTRIBUTING.md)
 - [开发记录](CHANGELOG.md)
 
 项目代码采用 [MIT](LICENSE)；第三方依赖、模型和资料的授权范围见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

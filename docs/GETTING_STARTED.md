@@ -57,6 +57,17 @@ backend/.venv/bin/python scripts/env_config.py --sync
 - 切换嵌入后检索降级：用原文件替换资料生成新索引，避免混用向量空间。
 - 搜索失败：检查网络，必要时关闭联网。一般知识解释不代表已核实网页。
 
-## 构建
+## 构建与本地检查
 
-在 `frontend/` 执行 `npm.cmd run build`（macOS/Linux 使用 `npm run build`）。开发与回归命令见 [贡献指南](../CONTRIBUTING.md)。模型评估工具见 [EVALUATION.md](EVALUATION.md)。
+在 `frontend/` 执行 `npm.cmd run build`（macOS/Linux 使用 `npm run build`）。
+
+在项目根目录运行后端回归和配置检查：
+
+```powershell
+backend/.venv/Scripts/python.exe -m pip install -r backend/requirements-dev.txt
+backend/.venv/Scripts/python.exe -m unittest discover -s backend/tests -v
+backend/.venv/Scripts/python.exe scripts/env_config.py --check-template
+backend/.venv/Scripts/python.exe scripts/check_repository.py --history --local-env
+```
+
+macOS/Linux 将 `backend/.venv/Scripts/python.exe` 换为 `backend/.venv/bin/python`。模型评估方法见[评估工具](EVALUATION.md)。
