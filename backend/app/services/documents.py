@@ -115,6 +115,32 @@ def version_info(version: DocumentVersion):
     }
 
 
+def pdf_original(session: Session, course_id: str, document_id: str, version_id: str):
+    """校验课程、资料及版本归属，定位指定版本的 PDF 原件。
+
+    Args:
+        session: 用于当前操作的 SQLAlchemy 会话。
+        course_id: 课程 ID。
+        document_id: 资料 ID。
+        version_id: 要读取的版本 ID。
+    Returns:
+        由原件存储路径和原始文件名组成的元组。
+    Raises:
+        CourseNotFound: 指定课程不存在。
+        DocumentError: 资料或版本不存在、归属不符、版本非 PDF，或原文件缺失。
+    """
+    require_document(session, course_id, document_id)
+    version = session.get(DocumentVersion, version_id)
+    if version is None or version.document_id != document_id:
+        raise DocumentError("资料版本不存在或不属于当前资料。", 404)
+    if Path(version.filename).suffix.lower() != ".pdf":
+        raise DocumentError("只有 PDF 资料支持原件预览。", 415)
+    path = raw_path(course_id, document_id, version.id, version.filename)
+    if not path.is_file():
+        raise DocumentError("PDF 原文件已缺失。", 404)
+    return path, version.filename
+
+
 def document_info(session: Session, document: Document):
     """汇总资料的最新版本与已发布版本。
 
@@ -138,6 +164,7 @@ def document_info(session: Session, document: Document):
         "updated_at": document.updated_at,
         "active_version_id": document.active_version_id,
         "active_version_number": active.number if active else None,
+        "active_version_filename": active.filename if active else None,
         "chunk_count": active.chunk_count if active else 0,
         "usable": active is not None and active.status == "ready",
         "latest": version_info(versions[0]),

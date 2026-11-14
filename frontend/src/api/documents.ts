@@ -12,5 +12,7 @@ export const documentsApi = {
   retry: (courseId: string, id: string) => request<CourseDocument>(`/courses/${courseId}/documents/${id}/retry`, {method: 'POST'}),
   delete: (courseId: string, id: string) => request<void>(`/courses/${courseId}/documents/${id}`, {method: 'DELETE'}),
   preview: (courseId: string, id: string, offset = 0) => request<Preview>(`/courses/${courseId}/documents/${id}/preview?offset=${offset}&limit=5`),
+  pdfUrl: (courseId: string, id: string, versionId: string) =>
+    `/api/courses/${courseId}/documents/${id}/versions/${versionId}/pdf`,
   search: (courseId: string, query: string, semantic: boolean, rerank: boolean) => request<SearchResult>(`/courses/${courseId}/search`, {method: 'POST', body: JSON.stringify({query, semantic, rerank})}),
 };

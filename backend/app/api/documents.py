@@ -4,6 +4,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Response, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -164,6 +165,37 @@ def delete_document(course_id: UUID, document_id: UUID, session: SessionDep):
     """
     documents.remove(session, str(course_id), str(document_id))
     return Response(status_code=204)
+
+
+@router.get(
+    "/courses/{course_id}/documents/{document_id}/versions/{version_id}/pdf",
+    response_class=FileResponse,
+    responses={200: {"content": {"application/pdf": {}}}},
+)
+def read_pdf(course_id: UUID, document_id: UUID, version_id: UUID, session: SessionDep):
+    """提供指定版本的 PDF 原件。
+
+    Args:
+        course_id: 课程 ID。
+        document_id: 资料 ID。
+        version_id: 要读取的版本 ID。
+        session: 用于当前操作的 SQLAlchemy 会话。
+    Returns:
+        支持字节范围请求的 PDF 文件响应，供阅读器内联显示。
+    Raises:
+        CourseNotFound: 指定课程不存在。
+        documents.DocumentError: 资料或版本不存在、归属不符、版本非 PDF，或原文件缺失。
+    """
+    path, filename = documents.pdf_original(
+        session, str(course_id), str(document_id), str(version_id)
+    )
+    return FileResponse(
+        path,
+        media_type="application/pdf",
+        filename=filename,
+        content_disposition_type="inline",
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )
 
 
 @router.get("/courses/{course_id}/documents/{document_id}/preview")

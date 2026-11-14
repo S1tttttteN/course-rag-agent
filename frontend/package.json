@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
+    "pdfjs-dist": "6.5.438",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",
@@ -25,6 +26,7 @@
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^5.0.0",
     "typescript": "~5.9.0",
-    "vite": "^7.0.0"
+    "vite": "^7.0.0",
+    "vite-plugin-static-copy": "4.1.1"
   }
 }

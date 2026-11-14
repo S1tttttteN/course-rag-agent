@@ -1,10 +1,13 @@
 """Version publication, course isolation and worker recovery with real local indexes."""
 import hashlib
+from io import BytesIO
 import os
 from threading import Event
 import time
 import unittest
 from unittest.mock import patch
+from urllib.parse import quote
+from uuid import uuid4
 from zipfile import ZipFile
 
 import httpx
@@ -21,6 +24,7 @@ from app.db.session import SessionLocal
 from app.jobs.indexing import cleanup_job, process_version, recover
 from app.retrieval import index
 from app.retrieval.loader import load_and_split
+from app.services.documents import raw_path
 
 
 class FakeEmbeddings:
@@ -144,6 +148,61 @@ class DocumentTests(unittest.TestCase):
         self.assertEqual(published['id'], original['id'])
         self.assertEqual(self.client.post(f'/api/courses/{self.course}/search', json={'query': '进程', 'semantic': False}).json()['results'], [])
         self.assertEqual(index.collection(self.course, 'test:3').count(), published['chunk_count'])
+
+    def test_pdf_original_enforces_ownership_and_survives_cross_format_replacement(self):
+        """验证 PDF 原件可按版本读取，且不跨课程、资料或删除边界。"""
+        writer = PdfWriter()
+        page = writer.add_blank_page(width=300, height=300)
+        font = DictionaryObject({
+            NameObject('/Subtype'): NameObject('/Type1'),
+            NameObject('/BaseFont'): NameObject('/Helvetica'),
+        })
+        page[NameObject('/Resources')] = DictionaryObject({
+            NameObject('/Font'): DictionaryObject({NameObject('/F1'): font}),
+        })
+        stream = DecodedStreamObject()
+        stream.set_data(b'BT /F1 12 Tf 10 100 Td (Original page) Tj ET')
+        page[NameObject('/Contents')] = writer._add_object(stream)
+        output = BytesIO()
+        writer.write(output)
+        data = output.getvalue()
+
+        filename = '课程讲义.PDF'
+        upload = self.client.post(self.prefix, files={'file': (filename, data)})
+        self.assertEqual(upload.status_code, 202)
+        document = upload.json()
+        document_id, version_id = document['id'], document['latest']['id']
+        url = f'{self.prefix}/{document_id}/versions/{version_id}/pdf'
+        self.assertIsNone(document['active_version_filename'])
+        original = self.client.get(url)
+        self.assertEqual(original.status_code, 200)
+        self.assertEqual(original.content, data)
+        self.assertEqual(original.headers['content-type'], 'application/pdf')
+        self.assertIn("inline; filename*=utf-8''" + quote(filename), original.headers['content-disposition'])
+        partial = self.client.get(url, headers={'Range': 'bytes=0-7'})
+        self.assertEqual(partial.status_code, 206)
+        self.assertEqual(partial.headers['content-range'], f'bytes 0-7/{len(data)}')
+        self.assertEqual(partial.content, data[:8])
+
+        self.assertEqual(self.process(document)['active_version_filename'], filename)
+        replacement = self.client.put(f'{self.prefix}/{document_id}/file', files={'file': ('新版.md', b'New text')})
+        self.assertEqual(replacement.status_code, 202)
+        self.assertEqual(replacement.json()['active_version_filename'], filename)
+        self.assertEqual(self.process(replacement.json())['active_version_filename'], '新版.md')
+        self.assertEqual(self.client.get(url).content, data)
+        replacement_id = replacement.json()['latest']['id']
+        self.assertEqual(self.client.get(f'{self.prefix}/{document_id}/versions/{replacement_id}/pdf').status_code, 415)
+        self.assertEqual(self.client.get(url.replace(self.course, self.other, 1)).status_code, 404)
+        self.assertEqual(self.client.get(url.replace(document_id, self.upload()['id'], 1)).status_code, 404)
+        self.assertEqual(self.client.get(url.replace(version_id, str(uuid4()))).status_code, 404)
+
+        path = raw_path(self.course, document_id, version_id, filename)
+        path.unlink()
+        self.assertEqual(self.client.get(url).status_code, 404)
+        path.write_bytes(data)
+        self.assertEqual(self.client.delete(f'{self.prefix}/{document_id}').status_code, 204)
+        self.assertTrue(path.exists())  # Access ends before background cleanup removes the bytes.
+        self.assertEqual(self.client.get(url).status_code, 404)
 
     def test_delete_immediately_hides_data_and_cleanup_removes_files(self):
         """验证删除立即隐藏资料，后台清理随后移除存储文件。"""

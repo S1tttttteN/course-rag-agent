@@ -17,6 +17,7 @@ export interface CourseDocument {
   course_id: string;
   active_version_id: string | null;
   active_version_number: number | null;
+  active_version_filename: string | null;
   chunk_count: number;
   usable: boolean;
   latest: DocumentVersion;
