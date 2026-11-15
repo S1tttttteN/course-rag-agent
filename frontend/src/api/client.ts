@@ -1,4 +1,6 @@
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(
+  path: string, init?: RequestInit, read: (response: Response) => Promise<T> = response => response.json(),
+): Promise<T> {
   let response: Response;
   try {
     response = await fetch(`/api${path}`, {
@@ -12,7 +14,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const body = await response.json().catch(() => null);
     throw new Error(typeof body?.detail === 'string' ? body.detail : '操作未完成，请稍后重试。');
   }
-  return response.status === 204 ? undefined as T : response.json();
+  return response.status === 204 ? undefined as T : read(response);
 }
 
 export { request };

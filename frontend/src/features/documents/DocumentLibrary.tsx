@@ -4,8 +4,7 @@ import { CheckCircle2, ChevronLeft, ChevronRight, Clock3, FileText, FolderOpen, 
 import { documentsApi } from '../../api/documents';
 import { Dialog } from '../../components/Dialog';
 import { ReadingPanel } from '../../components/ReadingPanel';
-import { isPdf } from '../../components/PdfReader';
-import { PdfReadingWindow } from '../../components/PdfReadingWindow';
+import { DocumentReadingWindow, documentReaderFormat } from '../../components/DocumentReadingWindow';
 import type { CourseDocument, LibraryConfig, Preview, SearchResult } from '../../types/document';
 
 function sizeLabel(size: number) { return size < 1024 * 1024 ? `${Math.max(1, Math.round(size / 1024))} KB` : `${(size / 1024 / 1024).toFixed(1)} MB`; }
@@ -14,13 +13,13 @@ function readableFile(document: CourseDocument) {
   const filename = document.active_version_id
     ? document.active_version_filename ?? document.name
     : document.latest.filename;
-  const pdf = isPdf(filename);
+  const format = documentReaderFormat(filename);
   return {
     filename,
-    pdf,
+    format,
     versionId: document.active_version_id ?? document.latest.id,
     version: document.active_version_number ?? document.latest.number,
-    available: pdf || document.usable,
+    available: format !== null || document.usable,
   };
 }
 
@@ -53,7 +52,7 @@ export function DocumentLibrary({ courseId }: { courseId: string }) {
   const selectedFile = selectedDocument ? readableFile(selectedDocument) : null;
   const selectedId = selectedDocument?.id;
   const selectedVersion = selectedDocument?.active_version_number;
-  const selectedIsPdf = selectedFile?.pdf ?? false;
+  const opensOriginal = !!selectedFile?.format;
   const offset = selection?.offset ?? 0;
   const previewKey = selectedId ? `${selectedId}:${selectedVersion}:${offset}:${previewAttempt}` : '';
   const currentPreview = preview?.key === previewKey ? preview : null;
@@ -88,7 +87,7 @@ export function DocumentLibrary({ courseId }: { courseId: string }) {
     if (selection && !selectedId) setSelection(null);
   }, [selectedId, selection]);
   useEffect(() => {
-    if (!selectedId || selectedIsPdf) return;
+    if (!selectedId || opensOriginal) return;
     let ignore = false;
     void documentsApi.preview(courseId, selectedId, offset).then(data => {
       if (ignore) return;
@@ -104,7 +103,7 @@ export function DocumentLibrary({ courseId }: { courseId: string }) {
       if (!ignore) setPreview({ key: previewKey, error: error instanceof Error ? error.message : '预览失败。' });
     });
     return () => { ignore = true; };
-  }, [courseId, offset, previewKey, reload, selectedId, selectedIsPdf, selectedVersion]);
+  }, [courseId, offset, opensOriginal, previewKey, reload, selectedId, selectedVersion]);
 
   async function uploadFiles(files: File[], replacing?: CourseDocument) {
     if (!files.length || busy) return;
@@ -152,12 +151,12 @@ export function DocumentLibrary({ courseId }: { courseId: string }) {
     catch (error) { setActionError(error instanceof Error ? error.message : '删除失败。'); }
     finally { setBusy(false); }
   }
-  function closePreview() {
+  const closePreview = useCallback(() => {
     setSelection(null);
     setPreview(null);
     const trigger = previewTrigger.current;
     requestAnimationFrame(() => trigger?.focus({ preventScroll: true }));
-  }
+  }, []);
   async function find(event: FormEvent) {
     event.preventDefault();
     if (!query.trim() || searching) return;
@@ -193,7 +192,7 @@ export function DocumentLibrary({ courseId }: { courseId: string }) {
         const pending = ['queued', 'processing'].includes(document.latest.status);
         const failed = document.latest.status === 'failed';
         const file = readableFile(document);
-        const openLabel = file.pdf ? '打开 PDF' : '查看提取文本';
+        const openLabel = file.format === 'pdf' ? '打开 PDF' : file.format ? '查看原文' : '查看提取文本';
         return <article className={`document-row${selectedId === document.id ? ' is-selected' : ''}`} key={document.id}>
           <div className="document-file-icon"><FileText size={23} strokeWidth={1.4} /><span>{document.latest.filename.split('.').pop()?.toUpperCase()}</span></div>
           <div className="document-body"><h3>{document.name}</h3><p className="document-meta">{sizeLabel(document.latest.size)} <span>版本 {document.latest.number}</span>{document.usable && <span>{document.chunk_count} 个可检索片段</span>}</p>
@@ -203,7 +202,7 @@ export function DocumentLibrary({ courseId }: { courseId: string }) {
           <div className="document-actions">
             <button type="button" className="text-button" disabled={!file.available || busy}
               aria-label={`${openLabel} ${document.name}`} aria-expanded={selectedId === document.id}
-              aria-haspopup={file.pdf ? 'dialog' : undefined}
+              aria-haspopup={file.format ? 'dialog' : undefined}
               onClick={event => {
                 previewTrigger.current = event.currentTarget;
                 setSelection({ id: document.id, offset: 0 });
@@ -222,7 +221,7 @@ export function DocumentLibrary({ courseId }: { courseId: string }) {
       {results && <div className="search-results" aria-live="polite"><p className="search-summary">找到 {results.results.length} 个片段{results.trace.semantic ? '，已结合语义与关键词检索' : '，使用关键词检索'}{results.trace.reranked && '，已重排'}。</p>{results.trace.note && <p className="subtle-note">{results.trace.note}</p>}{results.results.map((result, position) => <article key={result.id}><h3><span className="citation-number">[{position + 1}]</span>{result.source}<span className="result-location">版本 {result.version}{result.page !== null && ` / 第 ${result.page} 页`}</span></h3><p>{result.text}</p></article>)}{results.results.length === 0 && <p className="subtle-note">没有找到相关片段。试试资料中的关键词，或添加相关文件。</p>}</div>}
     </section>
     </div>
-    {selectedDocument && !selectedIsPdf ? <ReadingPanel title="提取文本" onClose={closePreview}>
+    {selectedDocument && !opensOriginal ? <ReadingPanel title="提取文本" onClose={closePreview}>
       <h3 className="citation-source-title">{currentPreview?.data?.source ?? selectedDocument.name}</h3>
       <p className="subtle-note">版本 {selectedDocument.active_version_number} · 共 {selectedDocument.chunk_count} 个片段</p>
       {!currentPreview && <p className="operation-note" role="status"><LoaderCircle size={15} className="spin" />正在读取原文…</p>}
@@ -242,11 +241,11 @@ export function DocumentLibrary({ courseId }: { courseId: string }) {
       </>}
     </ReadingPanel> : <aside className="reading-panel reading-placeholder" aria-label="资料原文">
       <header className="reading-panel-heading"><h2>资料原文</h2></header>
-      <p className="reading-panel-body subtle-note">从列表打开 PDF 或查看提取文本。</p>
+      <p className="reading-panel-body subtle-note">从列表查看资料原文或提取文本。</p>
     </aside>}
     </div>
-    {selectedDocument && selectedFile?.pdf && <PdfReadingWindow
-      url={documentsApi.pdfUrl(courseId, selectedDocument.id, selectedFile.versionId)}
+    {selectedDocument && selectedFile?.format && <DocumentReadingWindow
+      courseId={courseId} documentId={selectedDocument.id} versionId={selectedFile.versionId} format={selectedFile.format}
       filename={selectedFile.filename} version={selectedFile.version} onClose={closePreview} />}
 
     {deleting && <Dialog title="删除这份资料？" busy={busy} onClose={() => setDeleting(null)}><p className="dialog-description">「{deleting.name}」及其所有版本会从当前课程移除，之后不再参与检索。后台将清理原文件和向量索引，历史回答中的引用快照仍会保留。此操作无法撤销。</p>{actionError && <p className="error" role="alert">{actionError}</p>}<div className="dialog-actions"><button className="button secondary" disabled={busy} onClick={() => setDeleting(null)}>保留资料</button><button className="button destructive" disabled={busy} onClick={() => void remove()}>{busy ? '正在删除…' : '确认删除资料'}</button></div></Dialog>}

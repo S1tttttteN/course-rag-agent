@@ -4,6 +4,8 @@
 
 - Python/npm 依赖保留各自许可证，项目许可不替代依赖条款。前端依赖元数据见 `frontend/package-lock.json`，Python 依赖元数据可使用 `python -m pip show 包名` 查看。
 - PDF 阅读器使用 Mozilla PDF.js（Apache-2.0），发布构建随附本地渲染资源及其许可证。
+- Markdown 阅读器使用 KaTeX（MIT），发布构建随附字体及 KaTeX 许可证。
+- DOCX 阅读器使用 docx-preview（Apache-2.0）和 JSZip（采用 MIT 许可），发布构建随附其许可证。
 - Ollama、模型权重及云服务使用各自条款，本仓库不分发模型权重。
 - 用户上传的教材、课件、笔记、聊天及第三方网页不因使用本项目而取得 MIT 授权，分享前请确认权限。
 - 评估样例中的实验阈值、核验口令和注入标记均为虚构测试数据，不是实际服务凭证。

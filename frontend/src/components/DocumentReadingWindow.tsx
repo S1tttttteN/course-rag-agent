@@ -1,17 +1,35 @@
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent, PointerEvent, ReactNode } from 'react';
 import { GripHorizontal, Maximize, Minimize, X } from 'lucide-react';
+import { documentsApi } from '../api/documents';
+import type { Citation } from '../types/conversation';
 import { Dialog } from './Dialog';
 import { PdfReader } from './PdfReader';
 import type { PdfReadingPosition } from './PdfReader';
 import { compactReadingQuery, useMediaQuery } from './useMediaQuery';
 
+type ReaderFormat = 'pdf' | 'txt' | 'markdown' | 'html' | 'docx';
+
+const TextDocumentReader = lazy(() => import('./TextDocumentReader'));
+const RichDocumentReader = lazy(() => import('./RichDocumentReader'));
+
+export function documentReaderFormat(filename: string): ReaderFormat | null {
+  if (/\.pdf$/i.test(filename)) return 'pdf';
+  if (/\.txt$/i.test(filename)) return 'txt';
+  if (/\.md$/i.test(filename)) return 'markdown';
+  if (/\.html?$/i.test(filename)) return 'html';
+  if (/\.docx$/i.test(filename)) return 'docx';
+  return null;
+}
+
 interface Props {
-  url: string;
+  courseId: string;
+  documentId: string;
+  versionId: string;
+  format: ReaderFormat;
   filename: string;
   version: number;
-  initialPage?: number;
-  fromCitation?: boolean;
+  citation?: Pick<Citation, 'id' | 'page' | 'text' | 'start_index'>;
   onClose: () => void;
 }
 
@@ -64,7 +82,10 @@ function resizeBounds(bounds: Bounds, edge: ResizeEdge, dx: number, dy: number):
   return { left, top, width, height };
 }
 
-function FloatingPdfWindow({ filename, version, onClose, children }: Pick<Props, 'filename' | 'version' | 'onClose'> & { children: ReactNode }) {
+function FloatingReadingWindow({ title, filename, version, onClose, children }: Pick<Props, 'filename' | 'version' | 'onClose'> & {
+  title: string;
+  children: ReactNode;
+}) {
   const panel = useRef<HTMLElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
   const drag = useRef<{ id: number; x: number; y: number; bounds: Bounds; edge?: ResizeEdge } | null>(null);
@@ -82,8 +103,13 @@ function FloatingPdfWindow({ filename, version, onClose, children }: Pick<Props,
   }, []);
 
   function startDrag(event: PointerEvent<HTMLDivElement>, edge?: ResizeEdge) {
-    const rect = panel.current?.getBoundingClientRect();
-    if (!rect || maximized || drag.current || !event.isPrimary || event.button !== 0) return;
+    const element = panel.current;
+    if (!element || maximized || drag.current || !event.isPrimary || event.button !== 0) return;
+    const rect = element.getBoundingClientRect();
+    // A resize handle is not focusable. Keep keyboard shortcuts in the reader during the gesture.
+    event.preventDefault();
+    if (edge) element.focus({ preventScroll: true });
+    else event.currentTarget.focus({ preventScroll: true });
     event.currentTarget.setPointerCapture(event.pointerId);
     drag.current = { id: event.pointerId, x: event.clientX, y: event.clientY, bounds: rect, edge };
     if (!edge) setMoving(true);
@@ -129,8 +155,8 @@ function FloatingPdfWindow({ filename, version, onClose, children }: Pick<Props,
     setBounds(withinViewport({ left, top, width: bounds.width, height: bounds.height }));
   }
 
-  return <section role="dialog" aria-label="PDF 原文" ref={panel}
-    className={maximized ? 'pdf-window is-maximized' : 'pdf-window'}
+  return <section role="dialog" aria-label={title} ref={panel} tabIndex={-1}
+    className={maximized ? 'document-window is-maximized' : 'document-window'}
     style={!maximized && bounds ? { ...bounds, right: 'auto' } : undefined}
     onKeyDown={event => {
       if (event.key === 'Escape' && !event.defaultPrevented) {
@@ -138,9 +164,9 @@ function FloatingPdfWindow({ filename, version, onClose, children }: Pick<Props,
         onClose();
       }
     }}>
-    <header className="pdf-window-heading">
-      <div role="group" tabIndex={maximized ? -1 : 0} aria-label={maximized ? 'PDF 文件' : '移动 PDF 窗口，使用方向键'}
-        className={moving ? 'pdf-window-handle is-moving' : 'pdf-window-handle'}
+    <header className="document-window-heading">
+      <div role="group" tabIndex={maximized ? -1 : 0} aria-label={maximized ? '文件信息' : '移动阅读窗口，使用方向键'}
+        className={moving ? 'document-window-handle is-moving' : 'document-window-handle'}
         onPointerDown={event => startDrag(event)} onPointerMove={moveDrag} onLostPointerCapture={stopDrag}
         onKeyDown={moveWithKeyboard}>
         {!maximized && <GripHorizontal size={18} aria-hidden="true" />}
@@ -151,24 +177,35 @@ function FloatingPdfWindow({ filename, version, onClose, children }: Pick<Props,
         title={maximized ? '还原窗口' : '最大化窗口'} onClick={toggleMaximized}>
         {maximized ? <Minimize size={17} /> : <Maximize size={17} />}
       </button>
-      <button type="button" className="icon-button" aria-label="关闭 PDF 原文" ref={closeButton} onClick={onClose}><X size={18} /></button>
+      <button type="button" className="icon-button" aria-label={`关闭 ${title}`} ref={closeButton} onClick={onClose}><X size={18} /></button>
     </header>
     {children}
-    {!maximized && resizeEdges.map(edge => <div key={edge} className="pdf-window-resize" data-edge={edge}
+    {!maximized && resizeEdges.map(edge => <div key={edge} className="document-window-resize" data-edge={edge}
       aria-hidden="true" onPointerDown={event => startDrag(event, edge)} onPointerMove={moveDrag}
       onLostPointerCapture={stopDrag} />)}
   </section>;
 }
 
-export function PdfReadingWindow({ url, filename, version, initialPage, fromCitation, onClose }: Props) {
+export function DocumentReadingWindow({ courseId, documentId, versionId, format, filename, version, citation, onClose }: Props) {
   const compact = useMediaQuery(compactReadingQuery);
   const readingPosition = useRef<PdfReadingPosition>(null);
-  const reader = <PdfReader key={url} url={url} initialPage={initialPage} readingPosition={readingPosition} />;
+  const title = format === 'pdf' ? 'PDF 原文' : '资料原文';
+  const key = `${courseId}:${documentId}:${versionId}:${citation?.id ?? ''}`;
+  const reader = format === 'pdf'
+    ? <PdfReader key={key} url={documentsApi.pdfUrl(courseId, documentId, versionId)}
+        initialPage={citation?.page ?? 1} readingPosition={readingPosition} />
+    : <Suspense fallback={<p className="text-reader subtle-note" role="status">正在打开阅读器…</p>}>
+        {format === 'html' || format === 'docx'
+          ? <RichDocumentReader key={key} courseId={courseId} documentId={documentId} versionId={versionId} format={format}
+              quote={citation?.text} onClose={onClose} />
+          : <TextDocumentReader key={key} courseId={courseId} documentId={documentId} versionId={versionId} format={format}
+              citation={citation && { text: citation.text, startIndex: citation.start_index }} />}
+      </Suspense>;
 
   if (compact) {
-    return <Dialog title="PDF 原文" variant="sheet" busy={false} onClose={onClose}>
-      <div className="reading-panel-body pdf-sheet-body">
-        {fromCitation && <button type="button" className="text-button" onClick={onClose}>返回摘录</button>}
+    return <Dialog title={title} variant="sheet" busy={false} onClose={onClose}>
+      <div className="reading-panel-body document-sheet-body">
+        {citation && <button type="button" className="text-button" onClick={onClose}>返回摘录</button>}
         <h3 className="citation-source-title">{filename}</h3>
         <p className="subtle-note">版本 {version}</p>
         {reader}
@@ -176,7 +213,7 @@ export function PdfReadingWindow({ url, filename, version, initialPage, fromCita
     </Dialog>;
   }
 
-  return <FloatingPdfWindow filename={filename} version={version} onClose={onClose}>
+  return <FloatingReadingWindow title={title} filename={filename} version={version} onClose={onClose}>
     {reader}
-  </FloatingPdfWindow>;
+  </FloatingReadingWindow>;
 }

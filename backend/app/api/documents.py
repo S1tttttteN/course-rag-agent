@@ -198,6 +198,78 @@ def read_pdf(course_id: UUID, document_id: UUID, version_id: UUID, session: Sess
     )
 
 
+@router.get(
+    "/courses/{course_id}/documents/{document_id}/versions/{version_id}/docx",
+    response_class=FileResponse,
+)
+def read_docx(course_id: UUID, document_id: UUID, version_id: UUID, session: SessionDep):
+    """为站内阅读器提供指定版本的 Word 原件。
+
+    Args:
+        course_id: 课程 ID。
+        document_id: 资料 ID。
+        version_id: 要读取的版本 ID。
+        session: 用于当前操作的 SQLAlchemy 会话。
+    Returns:
+        供浏览器阅读器加载的 DOCX 文件响应。
+    Raises:
+        CourseNotFound: 指定课程不存在。
+        documents.DocumentError: 归属不符、格式不支持、原件缺失或压缩包无效。
+    """
+    path = documents.docx_original(session, str(course_id), str(document_id), str(version_id))
+    return FileResponse(
+        path,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Content-Disposition": "attachment"},
+    )
+
+
+@router.get("/courses/{course_id}/documents/{document_id}/versions/{version_id}/text")
+def read_text(
+    course_id: UUID, document_id: UUID, version_id: UUID, session: SessionDep, response: Response
+) -> dict[str, str]:
+    """读取指定版本的 TXT 或 Markdown 全文。
+
+    Args:
+        course_id: 课程 ID。
+        document_id: 资料 ID。
+        version_id: 要读取的版本 ID。
+        session: 用于当前操作的 SQLAlchemy 会话。
+        response: 用于设置缓存响应头的响应对象。
+    Returns:
+        包含解码后全文的字典。
+    Raises:
+        CourseNotFound: 指定课程不存在。
+        documents.DocumentError: 归属不符、原件缺失、格式不支持、解码失败或正文超长。
+    """
+    text = documents.text_original(session, str(course_id), str(document_id), str(version_id))
+    response.headers["Cache-Control"] = "no-store"
+    return {"text": text}
+
+
+@router.get("/courses/{course_id}/documents/{document_id}/versions/{version_id}/rich-preview")
+def read_rich_preview(
+    course_id: UUID, document_id: UUID, version_id: UUID, session: SessionDep, response: Response
+) -> dict[str, str]:
+    """读取指定版本的 HTML 或 DOCX 静态预览。
+
+    Args:
+        course_id: 课程 ID。
+        document_id: 资料 ID。
+        version_id: 要读取的版本 ID。
+        session: 用于当前操作的 SQLAlchemy 会话。
+        response: 用于设置缓存响应头的响应对象。
+    Returns:
+        包含清理后 HTML 正文和 CSS 文本的字典。
+    Raises:
+        CourseNotFound: 指定课程不存在。
+        documents.DocumentError: 资料归属不符、原件缺失、格式不支持或无法转换。
+    """
+    preview = documents.rich_original(session, str(course_id), str(document_id), str(version_id))
+    response.headers["Cache-Control"] = "no-store"
+    return preview
+
+
 @router.get("/courses/{course_id}/documents/{document_id}/preview")
 def preview_document(
     course_id: UUID,

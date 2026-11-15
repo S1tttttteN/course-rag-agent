@@ -14,7 +14,32 @@ SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf", ".docx", ".html", ".htm"}
 MAX_CHARACTERS = 2_000_000
 
 
-def _read_plain_text(path: Path) -> str:
+def read_html(path: Path) -> BeautifulSoup:
+    """按 HTML 字节内容及其声明的编码解析文件。
+
+    Args:
+        path: 已保存的 HTML 原件路径。
+    Returns:
+        供索引或预览处理的文档树。
+    """
+    return BeautifulSoup(path.read_bytes(), "html.parser")
+
+
+def validate_docx_archive(path: Path) -> None:
+    """检查 Word 压缩包声明的总解压大小。
+
+    Args:
+        path: 已保存的 DOCX 原件路径。
+    Raises:
+        BadZipFile: 文件不是有效的 ZIP 压缩包。
+        ValueError: 解压大小超过上限。
+    """
+    with ZipFile(path) as archive:
+        if sum(entry.file_size for entry in archive.infolist()) > 100 * 1024 * 1024:
+            raise ValueError("Word 解压后过大，请拆分文件。")
+
+
+def read_plain_text(path: Path) -> str:
     """按字节序标记或常用中文编码读取纯文本。
 
     Args:
@@ -24,7 +49,7 @@ def _read_plain_text(path: Path) -> str:
         去除字节序标记并统一换行后的正文。
 
     Raises:
-        ValueError: 文件无法按识别出的编码解码。
+        ValueError: 文件无法解码或正文超过长度上限。
     """
     with path.open("rb") as file:
         prefix = file.read(4)
@@ -38,9 +63,12 @@ def _read_plain_text(path: Path) -> str:
 
     for encoding in encodings:
         try:
-            return path.read_text(encoding=encoding)
+            text = path.read_text(encoding=encoding)
         except UnicodeDecodeError:
             continue
+        if len(text) > MAX_CHARACTERS:
+            raise ValueError("正文超过 200 万字，请拆分文件后上传。")
+        return text
     raise ValueError("无法识别文本编码，请另存为 UTF-8 后上传。")
 
 
@@ -82,15 +110,10 @@ def load_and_split(
                 )
     else:
         if suffix == ".docx":
-            with ZipFile(path) as archive:
-                if (
-                    sum(entry.file_size for entry in archive.infolist())
-                    > 100 * 1024 * 1024
-                ):
-                    raise ValueError("Word 解压后过大，请拆分文件。")
+            validate_docx_archive(path)
             text = docx2txt.process(str(path))
         elif suffix in {".html", ".htm"}:
-            soup = BeautifulSoup(path.read_bytes(), "html.parser")
+            soup = read_html(path)
             for tag in soup(["script", "style", "noscript"]):
                 tag.decompose()
             text = "\n".join(
@@ -99,7 +122,7 @@ def load_and_split(
                 if line.strip()
             )
         elif suffix in {".txt", ".md"}:
-            text = _read_plain_text(path)
+            text = read_plain_text(path)
         else:
             raise ValueError("不支持的文件格式。")
         if len(text) > MAX_CHARACTERS:

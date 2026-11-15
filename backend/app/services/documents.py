@@ -3,6 +3,7 @@
 import hashlib
 from pathlib import Path
 from uuid import uuid4
+from zipfile import BadZipFile
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -11,8 +12,9 @@ from app.core.config import MAX_UPLOAD_BYTES, UPLOAD_DIR
 from app.core.locks import catalog_lock
 from app.db.models import Chunk, CleanupJob, Course, Document, DocumentVersion, utc_now
 from app.repositories.documents import documents_for_course, versions_for_document
-from app.retrieval.loader import SUPPORTED_EXTENSIONS
+from app.retrieval.loader import SUPPORTED_EXTENSIONS, read_plain_text, validate_docx_archive
 from app.services.courses import CourseNotFound
+from app.services.rich_preview import render_rich_preview
 
 
 class DocumentError(Exception):
@@ -115,8 +117,39 @@ def version_info(version: DocumentVersion):
     }
 
 
+def _version_original(
+    session: Session, course_id: str, document_id: str, version_id: str,
+    extensions: set[str], format_label: str
+) -> tuple[Path, str]:
+    """校验归属和文件格式，定位指定版本的原件。
+
+    Args:
+        session: 用于当前操作的 SQLAlchemy 会话。
+        course_id: 课程 ID。
+        document_id: 资料 ID。
+        version_id: 要读取的版本 ID。
+        extensions: 当前阅读接口接受的文件扩展名。
+        format_label: 错误提示使用的格式名称。
+    Returns:
+        由原件存储路径和原始文件名组成的元组。
+    Raises:
+        CourseNotFound: 指定课程不存在。
+        DocumentError: 资料或版本不存在、归属不符、格式不支持，或原件缺失。
+    """
+    require_document(session, course_id, document_id)
+    version = session.get(DocumentVersion, version_id)
+    if version is None or version.document_id != document_id:
+        raise DocumentError("资料版本不存在或不属于当前资料。", 404)
+    if Path(version.filename).suffix.lower() not in extensions:
+        raise DocumentError(f"只有 {format_label} 资料支持原件预览。", 415)
+    path = raw_path(course_id, document_id, version.id, version.filename)
+    if not path.is_file():
+        raise DocumentError(f"{format_label} 原文件已缺失。", 404)
+    return path, version.filename
+
+
 def pdf_original(session: Session, course_id: str, document_id: str, version_id: str):
-    """校验课程、资料及版本归属，定位指定版本的 PDF 原件。
+    """定位可供阅读器读取的指定版本 PDF 原件。
 
     Args:
         session: 用于当前操作的 SQLAlchemy 会话。
@@ -127,18 +160,83 @@ def pdf_original(session: Session, course_id: str, document_id: str, version_id:
         由原件存储路径和原始文件名组成的元组。
     Raises:
         CourseNotFound: 指定课程不存在。
-        DocumentError: 资料或版本不存在、归属不符、版本非 PDF，或原文件缺失。
+        DocumentError: 资料或版本不存在、归属不符、版本非 PDF，或原件缺失。
     """
-    require_document(session, course_id, document_id)
-    version = session.get(DocumentVersion, version_id)
-    if version is None or version.document_id != document_id:
-        raise DocumentError("资料版本不存在或不属于当前资料。", 404)
-    if Path(version.filename).suffix.lower() != ".pdf":
-        raise DocumentError("只有 PDF 资料支持原件预览。", 415)
-    path = raw_path(course_id, document_id, version.id, version.filename)
-    if not path.is_file():
-        raise DocumentError("PDF 原文件已缺失。", 404)
-    return path, version.filename
+    return _version_original(session, course_id, document_id, version_id, {".pdf"}, "PDF")
+
+
+def docx_original(session: Session, course_id: str, document_id: str, version_id: str) -> Path:
+    """定位指定版本的 Word 原件并检查压缩包大小。
+
+    Args:
+        session: 用于校验资料及版本归属的 SQLAlchemy 会话。
+        course_id: 课程 ID。
+        document_id: 资料 ID。
+        version_id: 要读取的版本 ID。
+    Returns:
+        可供站内 Word 阅读器加载的版本路径。
+    Raises:
+        CourseNotFound: 指定课程不存在。
+        DocumentError: 归属不符、格式不支持、原件缺失或压缩包无效。
+    """
+    path, _ = _version_original(session, course_id, document_id, version_id, {".docx"}, "DOCX")
+    try:
+        validate_docx_archive(path)
+    except FileNotFoundError as error:
+        raise DocumentError("DOCX 原文件已缺失。", 404) from error
+    except BadZipFile as error:
+        raise DocumentError("无法读取 DOCX，请确认文件可在 Word 中打开。", 422) from error
+    except ValueError as error:
+        raise DocumentError(str(error), 422) from error
+    return path
+
+
+def text_original(session: Session, course_id: str, document_id: str, version_id: str) -> str:
+    """读取指定版本的 TXT 或 Markdown 全文，沿用检索索引的解码规则。
+
+    Args:
+        session: 用于当前操作的 SQLAlchemy 会话。
+        course_id: 课程 ID。
+        document_id: 资料 ID。
+        version_id: 要读取的版本 ID。
+    Returns:
+        解码并统一换行后的全文。
+    Raises:
+        CourseNotFound: 指定课程不存在。
+        DocumentError: 归属不符、原件缺失、格式不支持、解码失败或正文超长。
+    """
+    path, _ = _version_original(
+        session, course_id, document_id, version_id, {".txt", ".md"}, "TXT 或 Markdown"
+    )
+    try:
+        return read_plain_text(path)
+    except FileNotFoundError as error:
+        raise DocumentError("TXT 或 Markdown 原文件已缺失。", 404) from error
+    except ValueError as error:
+        raise DocumentError(str(error), 422) from error
+
+
+def rich_original(session: Session, course_id: str, document_id: str, version_id: str) -> dict[str, str]:
+    """生成指定版本的富文本阅读内容。
+
+    Args:
+        session: 用于校验资料及版本归属的 SQLAlchemy 会话。
+        course_id: 课程 ID。
+        document_id: 资料 ID。
+        version_id: 要读取的版本 ID。
+    Returns:
+        清理后的 HTML 正文和供隔离阅读器使用的样式文本。
+    Raises:
+        CourseNotFound: 指定课程不存在。
+        DocumentError: 资料归属不符、原件缺失、格式不支持或无法转换。
+    """
+    path, _ = _version_original(session, course_id, document_id, version_id, {".html", ".htm", ".docx"}, "HTML 或 DOCX")
+    try:
+        return render_rich_preview(path)
+    except FileNotFoundError as error:
+        raise DocumentError("资料原文件已缺失。", 404) from error
+    except ValueError as error:
+        raise DocumentError(str(error), 422) from error
 
 
 def document_info(session: Session, document: Document):

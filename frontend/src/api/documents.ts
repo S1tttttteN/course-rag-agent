@@ -14,5 +14,11 @@ export const documentsApi = {
   preview: (courseId: string, id: string, offset = 0) => request<Preview>(`/courses/${courseId}/documents/${id}/preview?offset=${offset}&limit=5`),
   pdfUrl: (courseId: string, id: string, versionId: string) =>
     `/api/courses/${courseId}/documents/${id}/versions/${versionId}/pdf`,
+  docx: (courseId: string, id: string, versionId: string, signal: AbortSignal) =>
+    request(`/courses/${courseId}/documents/${id}/versions/${versionId}/docx`, { signal }, response => response.blob()),
+  text: (courseId: string, id: string, versionId: string, signal: AbortSignal) =>
+    request<{ text: string }>(`/courses/${courseId}/documents/${id}/versions/${versionId}/text`, { signal }),
+  richPreview: (courseId: string, id: string, versionId: string, signal: AbortSignal) =>
+    request<{ html: string; css: string }>(`/courses/${courseId}/documents/${id}/versions/${versionId}/rich-preview`, { signal }),
   search: (courseId: string, query: string, semantic: boolean, rerank: boolean) => request<SearchResult>(`/courses/${courseId}/search`, {method: 'POST', body: JSON.stringify({query, semantic, rerank})}),
 };

@@ -17,3 +17,5 @@ jieba>=0.42,<1
 pypdf>=6.21.2,<7
 docx2txt>=0.8,<1
 beautifulsoup4>=4.12,<5
+mammoth>=1.13,<2
+nh3>=0.3.7,<0.4

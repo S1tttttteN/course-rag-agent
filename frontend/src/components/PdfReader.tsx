@@ -5,10 +5,6 @@ import type { PDFDocumentLoadingTask, ResponseException } from 'pdfjs-dist';
 import type { PDFViewer } from 'pdfjs-dist/web/pdf_viewer.mjs';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 
-export function isPdf(filename: string) {
-  return /\.pdf$/i.test(filename);
-}
-
 interface PageLocation {
   pageNumber: number;
   left: number;

@@ -11,6 +11,7 @@ from uuid import uuid4
 from zipfile import ZipFile
 
 import httpx
+from bs4 import BeautifulSoup
 from fastapi.testclient import TestClient
 from openai import APIStatusError
 from pypdf import PdfWriter
@@ -203,6 +204,175 @@ class DocumentTests(unittest.TestCase):
         self.assertEqual(self.client.delete(f'{self.prefix}/{document_id}').status_code, 204)
         self.assertTrue(path.exists())  # Access ends before background cleanup removes the bytes.
         self.assertEqual(self.client.get(url).status_code, 404)
+
+    def test_text_original_reads_queued_and_historical_versions(self):
+        """验证按版本读取全文，并在替换、删除和跨课程访问时校验原件。"""
+        filename = '调度.TXT'
+        draft = self.upload('原始讲义\n  轮转调度', filename)
+        document_id, version_id = draft['id'], draft['latest']['id']
+        base = f'{self.prefix}/{document_id}/versions'
+        old_url = f'{base}/{version_id}/text'
+        expected = {'text': '原始讲义\n  轮转调度'}
+        self.assertEqual(self.client.get(old_url).json(), expected)
+        self.assertEqual(self.client.get(old_url).headers['cache-control'], 'no-store')
+        self.process(draft)
+
+        replacement = self.client.put(
+            f'{self.prefix}/{document_id}/file',
+            files={'file': ('新版.html', b'<h1>New version</h1>', 'text/html')},
+        )
+        self.assertEqual(replacement.status_code, 202)
+        published = self.process(replacement.json())
+        self.assertEqual(published['active_version_filename'], '新版.html')
+        self.assertEqual(self.client.get(old_url).json(), expected)
+        self.assertEqual(self.client.get(f"{base}/{published['active_version_id']}/text").status_code, 415)
+        self.assertEqual(self.client.get(old_url.replace(self.course, self.other, 1)).status_code, 404)
+        self.assertEqual(self.client.get(old_url.replace(document_id, self.upload()['id'], 1)).status_code, 404)
+        self.assertEqual(self.client.get(f'{base}/{uuid4()}/text').status_code, 404)
+
+        path = raw_path(self.course, document_id, version_id, filename)
+        path.unlink()
+        self.assertEqual(self.client.get(old_url).status_code, 404)
+        path.write_text(expected['text'], encoding='utf-8')
+        self.assertEqual(self.client.delete(f'{self.prefix}/{document_id}').status_code, 204)
+        self.assertTrue(path.exists())
+        self.assertEqual(self.client.get(old_url).status_code, 404)
+
+    def test_text_original_uses_index_decoding_and_body_limit(self):
+        """验证全文读取与索引的解码、换行及长度限制一致。"""
+        text = '# 调度\r\n\t保留缩进\r课件'
+        for encoding in ('utf-8', 'gb18030', 'utf-16', 'utf-32'):
+            with self.subTest(encoding=encoding):
+                response = self.client.post(
+                    self.prefix, files={'file': (f'{encoding}.md', text.encode(encoding))}
+                )
+                self.assertEqual(response.status_code, 202)
+                document = response.json()
+                url = f"{self.prefix}/{document['id']}/versions/{document['latest']['id']}/text"
+                result = self.client.get(url)
+                self.assertEqual(result.status_code, 200)
+                self.assertEqual(result.json(), {'text': '# 调度\n\t保留缩进\n课件'})
+
+        for filename, data in (('invalid.txt', b'\xff\xfe\x00'), ('large.txt', b'a' * 2_000_001)):
+            with self.subTest(filename=filename):
+                response = self.client.post(self.prefix, files={'file': (filename, data)})
+                self.assertEqual(response.status_code, 202)
+                document = response.json()
+                url = f"{self.prefix}/{document['id']}/versions/{document['latest']['id']}/text"
+                self.assertEqual(self.client.get(url).status_code, 422)
+
+    def test_rich_preview_reads_safe_historical_html(self):
+        """验证 HTML 预览保留课件样式和链接，同时清理主动内容及外部资源。"""
+        png = (
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8'
+            '/x8AAwMCAO+jYxoAAAAASUVORK5CYII='
+        )
+        markup = f'''<!doctype html><html><head>
+        <meta charset="gbk"><base href="https://blocked.invalid/">
+        <meta http-equiv="refresh" content="0;url=https://blocked.invalid/">
+        <style>body.lecture {{ color: purple; }}</style>
+        <link rel="stylesheet" href="https://blocked.invalid/lecture.css"></head>
+        <body class="lecture"><h1 id="调度">课程讲义</h1>
+        <a href="#调度">本页目录</a><a href="https://example.test/page" ping="/api/courses">安全外链</a>
+        <a href="../next.html">相对文件</a><a href="javascript:alert(1)">危险链接</a>
+        <img src="data:image/png;base64,{png}" alt="内嵌图" onerror="alert(1)">
+        <img src="https://blocked.invalid/pixel" srcset="https://blocked.invalid/pixel2" alt="远程图">
+        <img src="data:image/png;base64,PHN2Zz4=" alt="伪装图片">
+        <form action="https://blocked.invalid/"><input name="bad"></form>
+        <iframe src="https://blocked.invalid/"></iframe><script>bad()</script>
+        </body></html>'''
+        response = self.client.post(self.prefix, files={'file': ('课件.HTM', markup.encode('gbk'), 'text/html')})
+        self.assertEqual(response.status_code, 202)
+        document = response.json()
+        document_id, old_id = document['id'], document['latest']['id']
+        base = f'{self.prefix}/{document_id}/versions'
+        url = f'{base}/{old_id}/rich-preview'
+        result = self.client.get(url)
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.headers['cache-control'], 'no-store')
+        preview = result.json()
+        self.assertIn('body.lecture { color: purple; }', preview['css'])
+        body = BeautifulSoup(preview['html'], 'html.parser')
+        self.assertEqual(body.div.get('class'), ['lecture'])
+        self.assertEqual(body.find('h1').get_text(), '课程讲义')
+        self.assertEqual([a.get('href') for a in body.find_all('a')], ['#调度', 'https://example.test/page', None, None])
+        self.assertEqual(body.find('img', alt='内嵌图').get('data-preview-image'), f'data:image/png;base64,{png}')
+        self.assertIsNone(body.find('img', alt='伪装图片').get('data-preview-image'))
+        self.assertNotIn('blocked.invalid', preview['html'])
+        self.assertIsNone(body.select_one('script, form, iframe, meta, link, base, [onerror], [srcset], [ping]'))
+
+        self.process(document)
+        replacement = self.client.put(
+            f'{self.prefix}/{document_id}/file', files={'file': ('新版.txt', b'new version')}
+        )
+        new_version = self.process(replacement.json())['active_version_id']
+        self.assertEqual(self.client.get(f'{base}/{new_version}/rich-preview').status_code, 415)
+        self.assertEqual(self.client.get(url).json(), preview)
+        self.assertEqual(self.client.get(url.replace(self.course, self.other, 1)).status_code, 404)
+        self.assertEqual(self.client.get(url.replace(document_id, self.upload()['id'], 1)).status_code, 404)
+        self.assertEqual(self.client.delete(f'{self.prefix}/{document_id}').status_code, 204)
+        self.assertEqual(self.client.get(url).status_code, 404)
+
+    def test_docx_preview_and_historical_original(self):
+        """验证 DOCX 的结构预览、历史版本原件及损坏文件的错误处理。"""
+        ns_word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        ns_rel = "http://schemas.openxmlformats.org/package/2006/relationships"
+        types = "http://schemas.openxmlformats.org/package/2006/content-types"
+        relationship = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        word = BytesIO()
+        with ZipFile(word, "w") as package:
+            package.writestr("[Content_Types].xml", f'''<Types xmlns="{types}">
+              <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+              <Default Extension="xml" ContentType="application/xml"/>
+              <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+              <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+            </Types>''')
+            package.writestr("_rels/.rels", f'''<Relationships xmlns="{ns_rel}">
+              <Relationship Id="r1" Type="{relationship}/officeDocument" Target="word/document.xml"/>
+            </Relationships>''')
+            package.writestr("word/_rels/document.xml.rels", f'''<Relationships xmlns="{ns_rel}">
+              <Relationship Id="r2" Type="{relationship}/styles" Target="styles.xml"/>
+            </Relationships>''')
+            package.writestr("word/styles.xml", f'''<w:styles xmlns:w="{ns_word}">
+              <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/></w:style>
+            </w:styles>''')
+            package.writestr("word/document.xml", f'''<w:document xmlns:w="{ns_word}"><w:body>
+              <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>作业要求</w:t></w:r></w:p>
+              <w:tbl><w:tr><w:tc><w:p><w:r><w:t>表格正文</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+            </w:body></w:document>''')
+        response = self.client.post(self.prefix, files={'file': ('作业.docx', word.getvalue())})
+        self.assertEqual(response.status_code, 202)
+        document = response.json()
+        url = f"{self.prefix}/{document['id']}/versions/{document['latest']['id']}/rich-preview"
+        preview = self.client.get(url)
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview.json()['css'], '')
+        body = BeautifulSoup(preview.json()['html'], 'html.parser')
+        self.assertEqual(body.h1.get_text(), '作业要求')
+        self.assertEqual(body.select_one('table tr td').get_text(), '表格正文')
+
+        original = url.removesuffix('/rich-preview') + '/docx'
+        result = self.client.get(original)
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.content, word.getvalue())
+        self.assertEqual(result.headers['cache-control'], 'no-store')
+        self.assertEqual(result.headers['x-content-type-options'], 'nosniff')
+        self.assertEqual(self.client.get(original.replace(self.course, self.other, 1)).status_code, 404)
+
+        self.process(document)
+        replaced = self.client.put(
+            f"{self.prefix}/{document['id']}/file", files={'file': ('新版.txt', b'new version')}
+        )
+        new_id = self.process(replaced.json())['active_version_id']
+        self.assertEqual(self.client.get(original.replace(document['latest']['id'], new_id)).status_code, 415)
+        self.assertEqual(self.client.get(original).content, word.getvalue())
+        self.assertEqual(self.client.delete(f"{self.prefix}/{document['id']}").status_code, 204)
+        self.assertEqual(self.client.get(original).status_code, 404)
+
+        broken = self.upload('invalid DOCX', 'invalid.docx')
+        invalid = f"{self.prefix}/{broken['id']}/versions/{broken['latest']['id']}/rich-preview"
+        self.assertEqual(self.client.get(invalid).status_code, 422)
+        self.assertEqual(self.client.get(invalid.removesuffix('/rich-preview') + '/docx').status_code, 422)
 
     def test_delete_immediately_hides_data_and_cleanup_removes_files(self):
         """验证删除立即隐藏资料，后台清理随后移除存储文件。"""

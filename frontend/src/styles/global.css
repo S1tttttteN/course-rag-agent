@@ -264,7 +264,7 @@ summary { cursor: pointer; }
 .search-summary, .result-location { color: var(--muted); font-size: 12px; }
 .preview-pagination { display: flex; justify-content: space-between; gap: 6px; margin-top: 12px; }
 
-.citation-pdf-action { margin-bottom: 10px; }
+.citation-original-action { margin-bottom: 10px; }
 .pdf-reader { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: 8px; gap: 6px; }
 .pdf-toolbar, .pdf-paging, .pdf-zoom { display: flex; align-items: center; gap: 4px; }
 .pdf-toolbar { flex-wrap: wrap; justify-content: space-between; }
@@ -299,11 +299,22 @@ summary { cursor: pointer; }
   border-radius: 50%;
   animation: spin .8s linear infinite;
 }
-.pdf-sheet-body { display: flex; flex: 1; flex-direction: column; align-items: stretch; overflow: hidden; }
-.pdf-sheet-body > .text-button { align-self: start; }
-.overlay-sheet:has(.pdf-sheet-body) { height: 82dvh; }
+.document-sheet-body { display: flex; flex: 1; flex-direction: column; align-items: stretch; overflow: hidden; }
+.document-sheet-body > .text-button { align-self: start; }
+.overlay-sheet:has(.document-sheet-body) { height: 82dvh; }
 
-.pdf-window {
+.text-reader { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; gap: 8px; padding: 12px; }
+.text-reader-frame { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius); }
+.text-reader-plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 14px/1.65 Consolas, ui-monospace, monospace; }
+.text-reader-plain mark { background: #ffecad; color: var(--ink); }
+.text-reader-frame .chat-markdown > :first-child { margin-top: 0; }
+.text-reader-frame .katex-display { overflow: auto hidden; padding-block: 3px; }
+.text-reader-frame .katex-display > .katex { width: max-content; min-width: 100%; text-align: center; }
+.text-reader-frame .chat-markdown .text-source-target,
+.text-reader-frame .chat-markdown tr.text-source-target > :is(td, th) { background: #fff4d2; }
+.rich-reader-frame { flex: 1; width: 100%; min-height: 0; border: 1px solid var(--line); border-radius: var(--radius); }
+
+.document-window {
   position: fixed;
   z-index: 3;
   top: clamp(0px, calc(100dvh - 240px), var(--topbar) + 12px);
@@ -317,10 +328,10 @@ summary { cursor: pointer; }
   border-radius: 10px;
   box-shadow: 0 12px 32px #19263a30;
 }
-.pdf-window.is-maximized { inset: 0; width: auto; height: auto; border-radius: 0; }
-.pdf-window.is-maximized .pdf-window-handle { cursor: default; }
-.pdf-window-heading { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
-.pdf-window-handle {
+.document-window.is-maximized { inset: 0; width: auto; height: auto; border-radius: 0; }
+.document-window.is-maximized .document-window-handle { cursor: default; }
+.document-window-heading { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.document-window-handle {
   flex: 1;
   min-width: 0;
   display: flex;
@@ -332,20 +343,20 @@ summary { cursor: pointer; }
   touch-action: none;
   user-select: none;
 }
-.pdf-window-handle.is-moving { cursor: grabbing; }
-.pdf-window-handle h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; color: var(--ink); }
-.pdf-window-handle .subtle-note { white-space: nowrap; margin-left: auto; }
-.pdf-window-resize { position: absolute; z-index: 2; touch-action: none; }
-.pdf-window-resize[data-edge="n"], .pdf-window-resize[data-edge="s"] { inset-inline: 10px; height: 6px; cursor: ns-resize; }
-.pdf-window-resize[data-edge="w"], .pdf-window-resize[data-edge="e"] { inset-block: 10px; width: 6px; cursor: ew-resize; }
-.pdf-window-resize[data-edge="n"], .pdf-window-resize[data-edge^="n"] { top: 0; }
-.pdf-window-resize[data-edge="s"], .pdf-window-resize[data-edge^="s"] { bottom: 0; }
-.pdf-window-resize[data-edge="w"], .pdf-window-resize[data-edge$="w"] { left: 0; }
-.pdf-window-resize[data-edge="e"], .pdf-window-resize[data-edge$="e"] { right: 0; }
-.pdf-window-resize[data-edge="nw"], .pdf-window-resize[data-edge="se"],
-.pdf-window-resize[data-edge="ne"], .pdf-window-resize[data-edge="sw"] { width: 10px; height: 10px; }
-.pdf-window-resize[data-edge="nw"], .pdf-window-resize[data-edge="se"] { cursor: nwse-resize; }
-.pdf-window-resize[data-edge="ne"], .pdf-window-resize[data-edge="sw"] { cursor: nesw-resize; }
+.document-window-handle.is-moving { cursor: grabbing; }
+.document-window-handle h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; color: var(--ink); }
+.document-window-handle .subtle-note { white-space: nowrap; margin-left: auto; }
+.document-window-resize { position: absolute; z-index: 2; touch-action: none; }
+.document-window-resize[data-edge="n"], .document-window-resize[data-edge="s"] { inset-inline: 10px; height: 6px; cursor: ns-resize; }
+.document-window-resize[data-edge="w"], .document-window-resize[data-edge="e"] { inset-block: 10px; width: 6px; cursor: ew-resize; }
+.document-window-resize[data-edge="n"], .document-window-resize[data-edge^="n"] { top: 0; }
+.document-window-resize[data-edge="s"], .document-window-resize[data-edge^="s"] { bottom: 0; }
+.document-window-resize[data-edge="w"], .document-window-resize[data-edge$="w"] { left: 0; }
+.document-window-resize[data-edge="e"], .document-window-resize[data-edge$="e"] { right: 0; }
+.document-window-resize[data-edge="nw"], .document-window-resize[data-edge="se"],
+.document-window-resize[data-edge="ne"], .document-window-resize[data-edge="sw"] { width: 10px; height: 10px; }
+.document-window-resize[data-edge="nw"], .document-window-resize[data-edge="se"] { cursor: nwse-resize; }
+.document-window-resize[data-edge="ne"], .document-window-resize[data-edge="sw"] { cursor: nesw-resize; }
 
 .overlay { border: 1px solid var(--line); background: var(--paper); color: var(--ink); border-radius: 10px; padding: 18px; width: min(520px, calc(100% - 28px)); max-height: calc(100dvh - 30px); }
 .overlay::backdrop { background: #19263a55; }

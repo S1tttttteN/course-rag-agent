@@ -4,11 +4,9 @@ import { createPortal } from 'react-dom';
 import { Link, NavLink, useMatch, useNavigate } from 'react-router-dom';
 import { ArrowUp, BookOpen, FileText, LoaderCircle, MessageSquare, Pencil, Plus, Settings2, Square, Trash2 } from 'lucide-react';
 import { conversationsApi } from '../../api/conversations';
-import { documentsApi } from '../../api/documents';
 import { Dialog } from '../../components/Dialog';
 import { ReadingPanel } from '../../components/ReadingPanel';
-import { isPdf } from '../../components/PdfReader';
-import { PdfReadingWindow } from '../../components/PdfReadingWindow';
+import { DocumentReadingWindow, documentReaderFormat } from '../../components/DocumentReadingWindow';
 import { compactReadingQuery, useMediaQuery } from '../../components/useMediaQuery';
 import type { ChatConfig, ChatMessage, Citation, Conversation, ConversationDetail, Run, ToolExecution } from '../../types/conversation';
 import { Answer } from './Answer';
@@ -61,22 +59,23 @@ export function ChatWorkspace({ courseId, courseName, navigationTarget, onNaviga
   const [title, setTitle] = useState('');
   const [selection, setSelection] = useState<{ runId: string; citation: Citation } | null>(null);
   const [citationError, setCitationError] = useState('');
-  const [showCitationPdf, setShowCitationPdf] = useState(false);
+  const [showCitationOriginal, setShowCitationOriginal] = useState(false);
   const thread = useRef<HTMLDivElement>(null);
   const autoScroll = useRef(true);
   const alive = useRef(true);
   const routeRef = useRef(conversationId);
   const citationRequest = useRef(0);
   const citationTrigger = useRef<HTMLElement | null>(null);
-  const pdfTrigger = useRef<HTMLButtonElement>(null);
+  const originalTrigger = useRef<HTMLButtonElement>(null);
   const compactReading = useMediaQuery(compactReadingQuery);
   const currentDetail = detail?.id === conversationId ? detail : null;
   const showingLibrary = library !== undefined;
   const active = currentDetail?.active_run;
   const selectedMessage = currentDetail?.messages.find(message => message.role === 'assistant' && message.run_id === selection?.runId);
   const citation = selection?.citation;
-  const hasCitationPdf = citation?.kind === 'course' && citation.source_state !== 'deleted' && isPdf(citation.source);
-  const viewingCitationPdf = showCitationPdf && hasCitationPdf;
+  const citationFormat = citation?.kind === 'course' && citation.source_state !== 'deleted'
+    ? documentReaderFormat(citation.source) : null;
+  const viewingCitationOriginal = showCitationOriginal && citationFormat !== null;
   const settingsDisabled = busy || !!active;
   const webSearch = mode === 'agent' && answerPreferences.web_search;
   const answerReview = active?.trace.answer_review ?? answerPreferences.answer_review;
@@ -130,7 +129,7 @@ export function ChatWorkspace({ courseId, courseName, navigationTarget, onNaviga
   useEffect(() => {
     routeRef.current = conversationId;
     setDetail(null); setError(''); setActionError(''); setDraft(''); setConnectionNote('');
-    setSelection(null); setShowCitationPdf(false); citationRequest.current++; autoScroll.current = true;
+    setSelection(null); setShowCitationOriginal(false); citationRequest.current++; autoScroll.current = true;
     citationTrigger.current = null;
     if (!conversationId) { setLoading(false); return; }
     setLoading(true);
@@ -251,7 +250,7 @@ export function ChatWorkspace({ courseId, courseName, navigationTarget, onNaviga
     if (!conversationId) return;
     const request = ++citationRequest.current;
     if (trigger) citationTrigger.current = trigger;
-    setShowCitationPdf(false);
+    setShowCitationOriginal(false);
     setSelection({ runId: message.run_id, citation: item });
     setCitationError('');
     try {
@@ -265,15 +264,15 @@ export function ChatWorkspace({ courseId, courseName, navigationTarget, onNaviga
   function closeCitation() {
     citationRequest.current++;
     setSelection(null);
-    setShowCitationPdf(false);
+    setShowCitationOriginal(false);
     const trigger = citationTrigger.current;
     requestAnimationFrame(() => trigger?.focus({ preventScroll: true }));
   }
 
-  function closeCitationPdf() {
-    setShowCitationPdf(false);
-    requestAnimationFrame(() => pdfTrigger.current?.focus({ preventScroll: true }));
-  }
+  const closeCitationOriginal = useCallback(() => {
+    setShowCitationOriginal(false);
+    requestAnimationFrame(() => originalTrigger.current?.focus({ preventScroll: true }));
+  }, []);
 
   const prompts = courseName.includes('操作系统') ? ['PCB 包含哪些信息？', '进程与线程有哪些区别？', '解释进程的状态转换。'] : ['梳理资料中的核心概念。', '比较资料中容易混淆的概念。', '这门课的资料主要讲了什么？'];
   return <>
@@ -366,7 +365,7 @@ export function ChatWorkspace({ courseId, courseName, navigationTarget, onNaviga
         </div>
       </div>
     </section>
-    {selection && selectedMessage && !(viewingCitationPdf && compactReading) && <ReadingPanel title="本轮引用" onClose={closeCitation}>
+    {selection && selectedMessage && !(viewingCitationOriginal && compactReading) && <ReadingPanel title="本轮引用" onClose={closeCitation}>
       <ul className="citation-list">
         {selectedMessage.citations.map(item => <li key={item.id}>
           <button type="button" className="nav-row" aria-current={item.id === selection.citation.id ? 'true' : undefined}
@@ -377,18 +376,20 @@ export function ChatWorkspace({ courseId, courseName, navigationTarget, onNaviga
       </ul>
       <section className="source-excerpt" aria-labelledby="excerpt-title">
         <h3 id="excerpt-title">引用摘录</h3>
-        {hasCitationPdf && <button type="button" className="button secondary citation-pdf-action" ref={pdfTrigger}
-          aria-haspopup="dialog" aria-expanded={viewingCitationPdf} onClick={() => setShowCitationPdf(true)}>
-          {selection.citation.page && selection.citation.page > 0 ? `查看第 ${selection.citation.page} 页` : '打开 PDF'}
+        {citationFormat && <button type="button" className="button secondary citation-original-action" ref={originalTrigger}
+          aria-haspopup="dialog" aria-expanded={viewingCitationOriginal} onClick={() => setShowCitationOriginal(true)}>
+          {citationFormat === 'pdf'
+            ? (selection.citation.page && selection.citation.page > 0 ? `查看第 ${selection.citation.page} 页` : '打开 PDF')
+            : '定位原文'}
         </button>}
         <SourceDetails citation={selection.citation} />
         {citationError && <p className="error" role="alert">{citationError}</p>}
       </section>
     </ReadingPanel>}
-    {selection && selectedMessage && viewingCitationPdf && <PdfReadingWindow
-      url={documentsApi.pdfUrl(courseId, selection.citation.document_id, selection.citation.version_id)}
+    {selection && selectedMessage && viewingCitationOriginal && citationFormat && <DocumentReadingWindow
+      courseId={courseId} documentId={selection.citation.document_id} versionId={selection.citation.version_id} format={citationFormat}
       filename={selection.citation.source} version={selection.citation.version}
-      initialPage={selection.citation.page ?? 1} fromCitation onClose={closeCitationPdf} />}
+      citation={selection.citation} onClose={closeCitationOriginal} />}
     </div>}
     {showingLibrary && actionError && !deleting && !renaming && <p className="toast" role="alert">{actionError}</p>}
     {deleting && <Dialog title="删除这段对话？" busy={busy} onClose={() => setDeleting(null)}><p className="dialog-description">「{deleting.title}」的消息与引用快照会一并删除，正在生成的回答也会停止。课程资料不受影响，此操作无法撤销。</p>{actionError && <p className="error" role="alert">{actionError}</p>}<div className="dialog-actions"><button className="button secondary" disabled={busy} onClick={() => setDeleting(null)}>保留对话</button><button className="button destructive" disabled={busy} onClick={() => void deleteConversation()}>确认删除对话</button></div></Dialog>}
