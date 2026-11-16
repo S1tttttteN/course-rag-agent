@@ -7,7 +7,9 @@ from threading import Event, Thread
 from openai import APIStatusError
 from sqlalchemy import delete, select, update
 
-from app.core.config import UPLOAD_DIR
+from langgraph.checkpoint.sqlite import SqliteSaver
+
+from app.core.config import CHECKPOINT_PATH, UPLOAD_DIR
 from app.core.locks import catalog_lock
 from app.core.models import CHUNK_OVERLAP, CHUNK_SIZE, embedding_profile, get_embeddings
 from app.db.models import Chunk, CleanupJob, Document, DocumentVersion, utc_now
@@ -205,7 +207,7 @@ def process_version(version_id: str, stopped: Event):
 
 
 def cleanup_job(job_id: str):
-    """回收已删除资料的向量和原件，失败时保留任务供后台重试。
+    """回收已删除资料或会话的存储，失败时保留任务供后台重试。
 
     Args:
         job_id: 清理任务 ID。
@@ -215,17 +217,21 @@ def cleanup_job(job_id: str):
         if job is None:
             return
         try:
-            index.remove_document(job.course_id, job.document_id)
-            path = (
-                (UPLOAD_DIR / job.course_id / job.document_id)
-                if job.document_id
-                else (UPLOAD_DIR / job.course_id)
-            )
-            resolved = path.resolve()
-            if UPLOAD_DIR.resolve() not in resolved.parents:
-                raise ValueError("清理路径超出资料目录")
-            if resolved.exists():
-                shutil.rmtree(resolved)
+            if job.conversation_id is not None:
+                with SqliteSaver.from_conn_string(str(CHECKPOINT_PATH)) as saver:
+                    saver.delete_thread(job.conversation_id)
+            else:
+                index.remove_document(job.course_id, job.document_id)
+                path = (
+                    (UPLOAD_DIR / job.course_id / job.document_id)
+                    if job.document_id
+                    else (UPLOAD_DIR / job.course_id)
+                )
+                resolved = path.resolve()
+                if UPLOAD_DIR.resolve() not in resolved.parents:
+                    raise ValueError("清理路径超出资料目录")
+                if resolved.exists():
+                    shutil.rmtree(resolved)
             session.delete(job)
         except Exception as error:
             job.attempts += 1

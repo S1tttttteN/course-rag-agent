@@ -224,9 +224,11 @@ async def delete_conversation(
         CourseNotFound: 指定课程不存在。
         conversations.ConversationError: 对话不存在或不属于指定课程。
     """
-    conversations.require_conversation(session, str(course_id), str(conversation_id))
-    request.app.state.runs.cancel_scope(str(course_id), str(conversation_id))
-    conversations.remove(session, str(course_id), str(conversation_id))
+    manager = request.app.state.runs
+    async with manager.submission_lock:
+        conversations.require_conversation(session, str(course_id), str(conversation_id))
+        await manager.cancel_scope(str(course_id), str(conversation_id))
+        conversations.remove(session, str(course_id), str(conversation_id))
     return Response(status_code=204)
 
 
@@ -257,22 +259,24 @@ async def create_run(
         conversations.ConversationError: 对话不存在或不属于指定课程（404）、
             对话已有活动运行（409），或后台任务数已达 6 个（429）。
     """
-    if len(request.app.state.runs.tasks) >= 6:
-        raise conversations.ConversationError("等待中的回答较多，请稍后再试。", 429)
-    result = conversations.create_run(
-        session,
-        str(course_id),
-        str(conversation_id),
-        body.question,
-        body.top_k,
-        body.semantic,
-        body.rerank,
-        body.mode,
-        web_search=body.web_search,
-        answer_review=body.answer_review,
-    )
-    # 运行记录提交后再启动任务，前端可用返回的 ID 单独订阅进度。
-    request.app.state.runs.start(result["id"])
+    manager = request.app.state.runs
+    async with manager.submission_lock:
+        if len(manager.tasks) >= 6:
+            raise conversations.ConversationError("等待中的回答较多，请稍后再试。", 429)
+        result = conversations.create_run(
+            session,
+            str(course_id),
+            str(conversation_id),
+            body.question,
+            body.top_k,
+            body.semantic,
+            body.rerank,
+            body.mode,
+            web_search=body.web_search,
+            answer_review=body.answer_review,
+        )
+        # 运行记录提交后再启动任务，前端可用返回的 ID 单独订阅进度。
+        manager.start(result["id"])
     return result
 
 

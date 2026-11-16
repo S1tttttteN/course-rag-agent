@@ -225,7 +225,7 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(answer['status'], 'cancelled')
         self.assertTrue(answer['citations'])
         with SessionLocal() as session:
-            self.assertEqual(completed_turns(session, self.conversation, 'next'), [])
+            self.assertEqual(list(completed_turns(session, self.conversation, 'next')), [])
 
     def test_recovery_marks_unfinished_tool_interrupted_without_replay(self):
         """验证重启恢复会标记未完成工具调用为中断。"""

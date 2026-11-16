@@ -4,17 +4,20 @@ from contextlib import asynccontextmanager
 import asyncio
 from pathlib import Path
 
+import aiosqlite
 from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from app.api.courses import router
 from app.api.documents import router as documents_router
 from app.api.conversations import router as conversations_router
-from app.core.config import ALLOWED_ORIGINS, DATA_DIR
+from app.core.config import ALLOWED_ORIGINS, CHECKPOINT_PATH, DATA_DIR
 from app.db.session import engine
 from app.services.courses import CourseNotFound
 from app.services.documents import DocumentError
@@ -39,19 +42,23 @@ async def lifespan(_app: FastAPI):
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     command.upgrade(config, "head")
     runs.recover()
-    _app.state.runs = RunManager()
-    worker = IndexWorker() if getattr(_app.state, "indexing_enabled", True) else None
-    if worker:
-        worker.start()
-    try:
-        yield
-    finally:
-        await _app.state.runs.close()
+    serializer = JsonPlusSerializer(allowed_msgpack_modules=None)
+    async with aiosqlite.connect(CHECKPOINT_PATH) as connection:
+        saver = AsyncSqliteSaver(connection, serde=serializer)
+        await saver.setup()
+        _app.state.runs = RunManager(saver)
+        worker = IndexWorker() if getattr(_app.state, "indexing_enabled", True) else None
         if worker:
-            worker.stop()
-            await asyncio.to_thread(worker.thread.join)
-        index.close()
-        engine.dispose()
+            worker.start()
+        try:
+            yield
+        finally:
+            await _app.state.runs.close()
+            if worker:
+                worker.stop()
+                await asyncio.to_thread(worker.thread.join)
+            index.close()
+            engine.dispose()
 
 
 app = FastAPI(title="课程研习室 API", version="0.1.0-alpha.1", lifespan=lifespan)

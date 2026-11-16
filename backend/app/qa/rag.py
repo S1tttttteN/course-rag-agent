@@ -2,6 +2,8 @@
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from app.qa.history import is_summary
+
 
 def text_content(message):
     """提取模型消息的纯文本内容。
@@ -30,7 +32,7 @@ async def rewrite_query(llm, question, history, callbacks=None):
     Args:
         llm: 用于调用对话模型的客户端。
         question: 用户提交的问题正文。
-        history: 已完成的历史问答，按时间升序排列。
+        history: 可选摘要及按时间升序排列的已完成问答消息。
         callbacks: 传给模型调用的可选回调列表。
 
     Returns:
@@ -39,7 +41,8 @@ async def rewrite_query(llm, question, history, callbacks=None):
     if not history:
         return question, ""
     previous = "\n".join(
-        f"用户：{turn['question']}\n助手：{turn['answer']}" for turn in history
+        f"{'历史摘要' if is_summary(message) else '助手' if isinstance(message, AIMessage) else '用户'}：{message.content}"
+        for message in history
     )
     try:
         import asyncio
@@ -61,8 +64,12 @@ async def rewrite_query(llm, question, history, callbacks=None):
             return rewritten[:500], ""
     except Exception:
         pass
+    previous_question = next(
+        (message.content for message in reversed(history) if isinstance(message, HumanMessage)),
+        "",
+    )
     return (
-        f"{history[-1]['question'][:300]}\n{question}",
+        f"{previous_question[:300]}\n{question}",
         "追问改写暂不可用，已结合上一问题检索。",
     )
 
@@ -72,7 +79,7 @@ def answer_messages(question, history, sources, *, answer_review):
 
     Args:
         question: 用户提交的问题正文。
-        history: 已完成的历史问答，按时间升序排列。
+        history: 可选摘要及按时间升序排列的已完成问答消息。
         sources: 本轮已登记的引用快照。
         answer_review: 是否要求所有事实有本轮证据支持。
 
@@ -102,10 +109,7 @@ def answer_messages(question, history, sources, *, answer_review):
                 )
             )
         ]
-    for turn in history:
-        messages.extend(
-            [HumanMessage(content=turn["question"]), AIMessage(content=turn["answer"])]
-        )
+    messages.extend(history)
     context = "\n\n".join(
         f"[{source['number']}] {source['source']}，版本{source['version']}"
         + (f"，第{source['page']}页" if source["page"] is not None else "")

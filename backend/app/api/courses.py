@@ -171,6 +171,9 @@ async def delete_course(course_id: UUID, svc: Service, request: Request):
     Raises:
         CourseNotFound: 指定课程不存在。
     """
-    request.app.state.runs.cancel_scope(str(course_id))
-    svc.delete(str(course_id))
+    manager = request.app.state.runs
+    async with manager.submission_lock:
+        svc.get(str(course_id))
+        await manager.cancel_scope(str(course_id))
+        svc.delete(str(course_id))
     return Response(status_code=204)

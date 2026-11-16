@@ -1,6 +1,8 @@
 """管理课程目录及课程删除后的存储清理。"""
 
-from app.db.models import CleanupJob, Course
+from sqlalchemy import select
+
+from app.db.models import CleanupJob, Conversation, Course
 from app.core.locks import catalog_lock
 from app.repositories.courses import CourseRepository
 
@@ -92,5 +94,10 @@ class CourseService:
         """
         with catalog_lock:
             course = self.get(course_id)
-            self.repository.session.add(CleanupJob(course_id=course_id))
+            session = self.repository.session
+            for conversation_id in session.scalars(
+                select(Conversation.id).where(Conversation.course_id == course_id)
+            ):
+                session.add(CleanupJob(course_id=course_id, conversation_id=conversation_id))
+            session.add(CleanupJob(course_id=course_id))
             self.repository.delete(course)

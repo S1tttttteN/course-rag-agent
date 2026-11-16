@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from app.core.locks import catalog_lock
 from app.db.models import (
     Citation,
+    CleanupJob,
     Conversation,
     Document,
     Message,
@@ -177,6 +178,7 @@ def remove(session, course_id, conversation_id):
     """
     with catalog_lock:
         session.delete(require_conversation(session, course_id, conversation_id))
+        session.add(CleanupJob(course_id=course_id, conversation_id=conversation_id))
         session.commit()
 
 

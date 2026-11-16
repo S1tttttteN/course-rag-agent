@@ -14,7 +14,7 @@ from app.db.session import SessionLocal
 from app.qa.rag import answer_messages, rewrite_query, text_content
 from app.qa.metrics import RunUsage
 from app.qa.evidence import EvidenceCheckError, publish_checked
-from app.repositories.conversations import completed_turns
+from app.qa.history import load_history, rag_history
 from app.retrieval.search import search
 from app.services import runs
 from app.services.conversations import ACTIVE, event
@@ -38,8 +38,10 @@ class RunManager:
         closing: 是否正在停止服务。
     """
 
-    def __init__(self):
-        """初始化任务登记并根据对话服务商设置并发上限。"""
+    def __init__(self, checkpointer):
+        """使用应用级检查点连接初始化问答任务和并发限制。"""
+        self.checkpointer = checkpointer
+        self.submission_lock = asyncio.Lock()
         self.tasks = {}
         self.offloads = set()
         from app.core.models import CHAT_PROVIDER
@@ -129,7 +131,8 @@ class RunManager:
                     if run is None:
                         return
                     conversation = session.get(Conversation, run.conversation_id)
-                    course_id, question = conversation.course_id, run.question
+                    course_id, conversation_id = conversation.course_id, conversation.id
+                    question = run.question
                     top_k, semantic, rerank = (
                         run.top_k,
                         bool(run.semantic),
@@ -137,7 +140,6 @@ class RunManager:
                     )
                     mode = run.mode
                     web_search, answer_review = run.web_search, run.answer_review
-                    history = completed_turns(session, conversation.id, run.id)
                     has_sources = (
                         session.scalar(
                             select(Document.id)
@@ -149,22 +151,28 @@ class RunManager:
                         )
                         is not None
                     )
+                config, saved, additions = await load_history(self.checkpointer, conversation_id, run_id)
+                history = rag_history(saved + additions)
                 if mode == "agent":
                     from app.qa.agent import execute_agent
 
-                    await execute_agent(
+                    checkpoint_id = await execute_agent(
                         self,
                         run_id,
                         course_id,
+                        conversation_id,
                         question,
                         history,
+                        config,
+                        saved,
+                        additions,
                         top_k,
                         semantic,
                         rerank,
                         web_search=web_search,
                         answer_review=answer_review,
                     )
-                    runs.finish(run_id, "completed")
+                    runs.finish(run_id, "completed", agent_checkpoint_id=checkpoint_id)
                     return
                 query, rewrite_note = question, ""
                 usage = RunUsage(run_id)
@@ -181,7 +189,7 @@ class RunManager:
                 result = await self.retrieve(course_id, query, top_k, semantic, rerank)
                 trace = {
                     **result["trace"],
-                    "history_turns": len(history),
+                    "history_turns": sum(message.type == "ai" for message in history),
                     "rewrite_note": rewrite_note,
                     "mode": "rag",
                 }
@@ -293,8 +301,8 @@ class RunManager:
         else:
             runs.finish(run_id, "cancelled")
 
-    def cancel_scope(self, course_id, conversation_id=None):
-        """请求取消指定课程或对话内的所有活动运行。
+    async def cancel_scope(self, course_id, conversation_id=None):
+        """取消指定范围内的活动运行并等待图写入结束。
 
         Args:
             course_id: 课程 ID。
@@ -309,8 +317,11 @@ class RunManager:
             if conversation_id:
                 query = query.where(Conversation.id == conversation_id)
             ids = list(session.scalars(query))
+        tasks = [self.tasks[run_id] for run_id in ids if run_id in self.tasks]
         for run_id in ids:
             self.cancel(run_id)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def close(self):
         """进入停机状态，等待问答任务和已提交的线程操作结束。"""

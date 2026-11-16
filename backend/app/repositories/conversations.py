@@ -1,6 +1,6 @@
 """封装对话目录、消息历史和已完成问答的查询。"""
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from app.db.models import Conversation, Message, Run
 
 
@@ -43,36 +43,36 @@ def conversation_messages(session, conversation_id):
     )
 
 
-def completed_turns(session, conversation_id, exclude_run_id):
-    """按时间顺序返回最近三轮已完成问答作为模型上下文，排除当前运行。
+def completed_turns(session, conversation_id, exclude_run_id, *, after=None):
+    """按时间倒序读取已完成问答，供调用方按预算截取。
 
     Args:
         session: 用于当前操作的 SQLAlchemy 会话。
         conversation_id: 对话 ID。
         exclude_run_id: 需要排除的当前运行 ID。
+        after: 历史起点对应的已提交运行。
 
-    Returns:
-        按时间升序排列的问答字典列表，问题和回答分别截断到 2000 个字符。
+    Yields:
+        运行 ID、用户问题和已发布回答。
     """
-    runs = list(
-        session.scalars(
-            select(Run)
-            .where(
-                Run.conversation_id == conversation_id,
-                Run.id != exclude_run_id,
-                Run.status == "completed",
-            )
-            .order_by(Run.created_at.desc())
-            .limit(3)
+    query = (
+        select(Run.id, Run.question, Message.content)
+        .join(Message, Message.run_id == Run.id)
+        .where(
+            Run.conversation_id == conversation_id,
+            Run.id != exclude_run_id,
+            Run.status == "completed",
+            Message.role == "assistant",
         )
+        .order_by(Run.created_at.desc(), Run.id.desc())
+        .execution_options(yield_per=10)
     )
-    result = []
-    for run in reversed(runs):
-        answer = session.scalar(
-            select(Message).where(Message.run_id == run.id, Message.role == "assistant")
-        )
-        if answer:
-            result.append(
-                {"question": run.question[:2000], "answer": answer.content[:2000]}
+    if after is not None:
+        query = query.where(
+            or_(
+                Run.created_at > after.created_at,
+                and_(Run.created_at == after.created_at, Run.id > after.id),
             )
-    return result
+        )
+    with session.execute(query) as rows:
+        yield from rows

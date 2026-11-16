@@ -1,17 +1,26 @@
 """Natural/web mode on the real LangChain graph, without network or paid calls."""
 import asyncio
+from contextlib import closing
 import json
+import sqlite3
 import time
 import unittest
 from unittest.mock import patch
 
+from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, AIMessageChunk
-from langchain_core.outputs import ChatGenerationChunk
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+from pydantic import Field
+from sqlalchemy import select
 
 from test_agent import ScriptedModel, call
 import test_conversations as shared
 from app.repositories.conversations import completed_turns
+from app.core.config import CHECKPOINT_PATH
+from app.db.models import CleanupJob, Run
 from app.db.session import SessionLocal
+from app.jobs.indexing import cleanup_job
+from app.services import runs
 
 
 URL = 'https://example.org/course'
@@ -87,6 +96,21 @@ class FailingModel(StreamingModel):
         raise RuntimeError('private-provider-error-fixture')
 
 
+class SummaryModel(ScriptedModel):
+    """在真实摘要中间件调用时提供确定的摘要并记录输入。"""
+
+    summary_inputs: list[str] = Field(default_factory=list)
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        """区分摘要请求与用户问答，便于断言早期约定确实进入摘要。"""
+        if '中文会话摘要' in messages[-1].content:
+            prompt = messages[-1].content
+            self.summary_inputs.append(prompt)
+            label = '方案 A 指多级反馈队列' if '方案 A 指多级反馈队列' in prompt else '缺少方案 A 的定义'
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content='摘要：' + label))])
+        return super()._generate(messages, stop, run_manager, **kwargs)
+
+
 class NaturalAgentTests(unittest.TestCase):
     """验证关闭严格核对时的流式问答与可选网络来源。"""
 
@@ -133,6 +157,132 @@ class NaturalAgentTests(unittest.TestCase):
         self.assertFalse(answer['run']['trace']['web_search'])
         self.review.assert_not_called()
         self.web_search.assert_not_called()
+
+    def test_summary_restores_after_restart_and_agent_rag_switch(self):
+        """验证首轮定义经过真实摘要、重启和模式切换后仍可使用。"""
+        model = SummaryModel(responses=[AIMessage(content='已经记录。' + '复习内容。' * 120)])
+        definition = '方案 A 指多级反馈队列'
+        with patch('app.qa.agent.get_llm', return_value=model):
+            for number in range(4):
+                question = '请记录：' + definition if number == 0 else f'第 {number} 轮复习'
+                answer = self.wait(self.ask(question + '上下文。' * 135))
+                self.assertEqual(answer['status'], 'completed')
+            fifth = self.wait(self.ask('方案 A 是什么？'))
+            self.assertEqual(fifth['status'], 'completed')
+        self.assertTrue(any(definition in prompt for prompt in model.summary_inputs))
+        self.assertIn('摘要：' + definition, '\n'.join(item.content for item in model.seen[-1]))
+        self.assertFalse(any(item.content.startswith('请记录：') for item in model.seen[-1]))
+        self.assertGreaterEqual(fifth['run']['trace']['usage']['model_calls'], 2)
+        self.assertEqual(fifth['run']['trace']['usage']['summary_calls'], 1)
+        self.assertNotIn('摘要：', fifth['content'])
+        events = self.client.get(f"{self.path}/runs/{fifth['run_id']}/events").text
+        self.assertNotIn('摘要：', events)
+        with SessionLocal() as session:
+            self.assertIsNotNone(session.get(Run, fifth['run_id']).agent_checkpoint_id)
+
+        self.context.__exit__(None, None, None)
+        self.context = TestClient(shared.app)
+        self.client = self.context.__enter__()
+        rag = shared.FakeLLM('固定 RAG 的唯一回答。')
+        with patch('app.qa.manager.get_llm', return_value=rag):
+            self.assertEqual(self.wait(self.ask('接着解释方案 A', mode='rag'))['status'], 'completed')
+        self.assertIn(definition, rag.rewrites[-1][-1].content)
+        resumed = SummaryModel(responses=[AIMessage(content='接着复习。')])
+        with patch('app.qa.agent.get_llm', return_value=resumed):
+            self.assertEqual(self.wait(self.ask('继续接着讲'))['status'], 'completed')
+        context = '\n'.join(item.content for item in resumed.seen[-1])
+        self.assertIn(definition, context)
+        self.assertEqual(context.count(rag.answer), 1)
+        self.assertEqual(context.count('方案 A 是什么？'), 1)
+        isolated_id = self.client.post(self.base, json={}).json()['id']
+        self.path = f'{self.base}/{isolated_id}'
+        with patch('app.qa.agent.get_llm', return_value=resumed):
+            self.assertEqual(self.wait(self.ask('开始新对话'))['status'], 'completed')
+        self.assertNotIn(definition, '\n'.join(item.content for item in resumed.seen[-1]))
+
+    def test_first_agent_turn_loads_existing_rag_history(self):
+        """验证首次使用 Agent 可以载入已有对话里超过三轮的已完成问答。"""
+        first_question = '记住起始约定 K7。'
+        with patch('app.qa.manager.get_llm', return_value=shared.FakeLLM('收到')):
+            for question in (first_question, '第二轮', '第三轮', '第四轮'):
+                self.assertEqual(self.wait(self.ask(question, mode='rag'))['status'], 'completed')
+        model = SummaryModel(responses=[AIMessage(content='接上前文。')])
+        with patch('app.qa.agent.get_llm', return_value=model):
+            self.assertEqual(self.wait(self.ask('起始约定是什么？'))['status'], 'completed')
+        self.assertEqual(sum(item.content == first_question for item in model.seen[-1]), 1)
+
+    def test_summary_failure_keeps_previous_checkpoint(self):
+        """验证摘要失败会终止本轮，下一轮仍从上次成功的检查点开始。"""
+        model = SummaryModel(responses=[AIMessage(content='已记录。' + '复习内容。' * 750)])
+        with patch('app.qa.agent.get_llm', return_value=model):
+            original = self.wait(self.ask('保留上一轮。' + '上下文。' * 950))
+            self.assertEqual(original['status'], 'completed')
+            with patch('app.qa.history.SummarizationMiddleware.abefore_model', side_effect=RuntimeError):
+                dropped = self.wait(self.ask('摘要调用失败的提问'))
+            self.assertEqual(dropped['status'], 'failed')
+            with SessionLocal() as session:
+                self.assertIsNone(session.get(Run, dropped['run_id']).agent_checkpoint_id)
+        followup = SummaryModel(responses=[AIMessage(content='继续。')])
+        with patch('app.qa.agent.get_llm', return_value=followup):
+            self.assertEqual(self.wait(self.ask('重新提问'))['status'], 'completed')
+        self.assertNotIn('摘要调用失败的提问', '\n'.join(item.content for item in followup.seen[-1]))
+
+    def test_failed_branch_does_not_enter_next_turn(self):
+        """验证生成失败的会话分支和未提交的检查点不会进入下一轮。"""
+        model = ScriptedModel(responses=[AIMessage(content='首轮正式回答')])
+        with patch('app.qa.agent.get_llm', return_value=model):
+            self.assertEqual(self.wait(self.ask('有效输入'))['status'], 'completed')
+        with patch('app.qa.agent.get_llm', return_value=FailingModel(responses=[])):
+            self.assertEqual(self.wait(self.ask('失败分支输入'))['status'], 'failed')
+        with patch('app.qa.agent.get_llm', return_value=model):
+            self.assertEqual(self.wait(self.ask('继续上一轮'))['status'], 'completed')
+        contents = [item.content for item in model.seen[-1]]
+        self.assertIn('首轮正式回答', contents)
+        self.assertNotIn('失败分支输入', contents)
+        self.assertNotIn('已生成的部分。', contents)
+
+    def test_checkpoint_written_before_failed_commit_is_ignored(self):
+        """模拟检查点已落盘但业务终态提交失败，验证下一轮仍使用上次成功的历史。"""
+        model = ScriptedModel(responses=[AIMessage(content='正式回答')])
+        finish = runs.finish
+
+        def fail_commit(run_id, state, error='', *, agent_checkpoint_id=None):
+            """在新检查点提交给业务库前模拟异常。"""
+            if state == 'completed' and agent_checkpoint_id:
+                raise RuntimeError('模拟检查点已写入后的业务提交失败')
+            return finish(run_id, state, error, agent_checkpoint_id=agent_checkpoint_id)
+
+        with patch('app.qa.agent.get_llm', return_value=model):
+            self.assertEqual(self.wait(self.ask('应保留的问题'))['status'], 'completed')
+            with patch('app.qa.manager.runs.finish', side_effect=fail_commit):
+                dropped = self.wait(self.ask('未提交的问题'))
+            self.assertEqual(dropped['status'], 'failed')
+            self.assertEqual(self.wait(self.ask('继续前一个问题'))['status'], 'completed')
+        contents = [item.content for item in model.seen[-1]]
+        self.assertIn('应保留的问题', contents)
+        self.assertNotIn('未提交的问题', contents)
+
+    def test_conversation_and_course_deletion_cleanup_checkpoints(self):
+        """验证会话删除与课程删除都会登记并回收各自的检查点。"""
+        model = ScriptedModel(responses=[AIMessage(content='已保存')])
+        with patch('app.qa.agent.get_llm', return_value=model):
+            self.assertEqual(self.wait(self.ask())['status'], 'completed')
+            first = self.conversation
+            self.assertEqual(self.client.delete(self.path).status_code, 204)
+            self.conversation = self.client.post(self.base, json={}).json()['id']
+            self.path = f'{self.base}/{self.conversation}'
+            self.assertEqual(self.wait(self.ask())['status'], 'completed')
+        self.assertEqual(self.client.delete(f'/api/courses/{self.course}').status_code, 204)
+        with SessionLocal() as session:
+            jobs = dict(session.execute(
+                select(CleanupJob.conversation_id, CleanupJob.id).where(CleanupJob.course_id == self.course)
+            ).all())
+        with closing(sqlite3.connect(CHECKPOINT_PATH)) as connection:
+            for identifier in (first, self.conversation):
+                query = 'SELECT count(*) FROM checkpoints WHERE thread_id = ?'
+                self.assertGreater(connection.execute(query, (identifier,)).fetchone()[0], 0)
+                cleanup_job(jobs[identifier])
+                self.assertEqual(connection.execute(query, (identifier,)).fetchone()[0], 0)
 
     def test_course_then_web_sources_are_numbered_deduplicated_and_persisted(self):
         """验证课程与网络来源共享编号空间、重复来源去重且引用持久化。"""
@@ -229,7 +379,7 @@ class NaturalAgentTests(unittest.TestCase):
         self.assertEqual(answer['status'], 'cancelled')
         self.assertEqual(answer['content'], partial['content'])
         with SessionLocal() as session:
-            self.assertEqual(completed_turns(session, self.conversation, 'next'), [])
+            self.assertEqual(list(completed_turns(session, self.conversation, 'next')), [])
 
     def test_failed_stream_preserves_partial_text_without_leaking_provider_error(self):
         """验证流式输出失败时保留已发布正文，并隐藏服务商异常细节。"""

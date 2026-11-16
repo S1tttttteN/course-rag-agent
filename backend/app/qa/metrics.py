@@ -10,6 +10,7 @@ class RunUsage(AsyncCallbackHandler):
     Attributes:
         run_id: 当前问答运行 ID。
         calls: 已开始的模型调用次数。
+        summary_calls: 已开始的摘要模型调用次数。
         reported: 已返回用量信息的调用次数。
         input_tokens: 已报告的输入 Token 总数。
         output_tokens: 已报告的输出 Token 总数。
@@ -23,6 +24,7 @@ class RunUsage(AsyncCallbackHandler):
         """
         self.run_id = run_id
         self.calls = 0
+        self.summary_calls = 0
         self.reported = 0
         self.input_tokens = 0
         self.output_tokens = 0
@@ -34,6 +36,7 @@ class RunUsage(AsyncCallbackHandler):
             {
                 "usage": {
                     "model_calls": self.calls,
+                    "summary_calls": self.summary_calls,
                     "calls_with_usage": self.reported,
                     "input_tokens": self.input_tokens if self.reported else None,
                     "output_tokens": self.output_tokens if self.reported else None,
@@ -48,9 +51,12 @@ class RunUsage(AsyncCallbackHandler):
         Args:
             serialized: LangChain 提供的模型序列化信息。
             messages: 发送给模型的各组输入消息。
+            **kwargs: LangChain 回调参数，包含内部调用的来源标记。
             kwargs: 调用方附加的关键字参数。
         """
         self.calls += 1
+        if (kwargs.get("metadata") or {}).get("lc_source") == "summarization":
+            self.summary_calls += 1
         self.publish()
 
     async def on_llm_end(self, response, **kwargs):

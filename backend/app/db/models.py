@@ -145,6 +145,7 @@ class CleanupJob(Base):
         id: 清理任务 ID。
         course_id: 待清理范围的课程 ID。
         document_id: 待清理资料 ID，为 None 时清理整门课程。
+        conversation_id: 待清理检查点的会话 ID，留空时清理资料存储。
         attempts: 已记录的失败次数。
         error: 最近一次清理失败的说明。
         created_at: 创建时间。
@@ -157,6 +158,7 @@ class CleanupJob(Base):
     )
     course_id: Mapped[str] = mapped_column(String(36))
     document_id: Mapped[str | None] = mapped_column(String(36))
+    conversation_id: Mapped[str | None] = mapped_column(String(36))
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[str] = mapped_column(String(40), default=utc_now)
@@ -203,6 +205,7 @@ class Run(Base):
         rerank: 重排序开关，以整数保存。
         web_search: 本轮是否允许 Agent 联网。
         answer_review: 本轮是否在发布正文前核对证据。
+        agent_checkpoint_id: 本轮提交的会话检查点 ID。
         created_at: 创建时间。
     """
 
@@ -233,6 +236,7 @@ class Run(Base):
     rerank: Mapped[int] = mapped_column(Integer, default=1)
     web_search: Mapped[bool] = mapped_column(Boolean, server_default=false())
     answer_review: Mapped[bool] = mapped_column(Boolean, server_default=false())
+    agent_checkpoint_id: Mapped[str | None] = mapped_column(String(36))
     created_at: Mapped[str] = mapped_column(String(40), default=utc_now)
 
 

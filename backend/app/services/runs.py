@@ -230,13 +230,14 @@ def append(run_id, text):
         return True
 
 
-def finish(run_id, state, error=""):
+def finish(run_id, state, error="", *, agent_checkpoint_id=None):
     """提交运行和消息的终态与结束事件，重复结束已终止的运行时直接返回。
 
     Args:
         run_id: 问答运行 ID。
         state: 预期的终态，支持 completed、cancelled、interrupted 和 failed。
         error: 要记录的失败或中断说明。
+        agent_checkpoint_id: 仅随成功终态提交的会话检查点 ID。
     """
     with catalog_lock, SessionLocal() as session:
         run = session.get(Run, run_id)
@@ -245,6 +246,8 @@ def finish(run_id, state, error=""):
         if run.status == "cancelling" and state == "completed":
             state = "cancelled"
         run.status = state
+        if state == "completed":
+            run.agent_checkpoint_id = agent_checkpoint_id
         run.phase = {
             "completed": "回答完成",
             "cancelled": "已停止",
