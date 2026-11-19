@@ -14,6 +14,7 @@ import test_conversations as shared
 from app.db.models import Run
 from app.db.session import SessionLocal
 from app.repositories.conversations import completed_turns
+from app.qa.tools import list_documents, read_document, read_webpage, search_course, search_web
 from app.services import conversations, runs
 
 
@@ -106,6 +107,25 @@ class ScriptedModel(BaseChatModel):
         return self._generate(messages)
 
 
+class ToolSchemaTests(unittest.TestCase):
+    """校验模型可见的工具参数。"""
+
+    def test_tool_schema_keeps_runtime_and_course_scope_internal(self):
+        """模型只能看到各工具的业务参数。"""
+        expected = {
+            "search_course": {"query"},
+            "list_documents": {"offset"},
+            "read_document": {"document_id", "version_id", "offset", "limit"},
+            "search_web": {"query"},
+            "read_webpage": {"url"},
+        }
+        tools = [search_course, list_documents, read_document, search_web, read_webpage]
+        for tool in tools:
+            with self.subTest(tool=tool.name):
+                schema = tool.tool_call_schema.model_json_schema()
+                self.assertEqual(set(schema["properties"]), expected[tool.name])
+
+
 class AgentTests(unittest.TestCase):
     """验证启用证据审查时的 Agent 工具调用和问答生命周期。"""
 
@@ -185,7 +205,7 @@ class AgentTests(unittest.TestCase):
     def test_budget_stops_repeated_invalid_calls(self):
         """验证反复提交无效工具参数会耗尽调用预算。"""
         model = ScriptedModel(responses=[call('search_course', {'query': '进程', 'invalid': True})])
-        with patch('app.qa.agent.get_llm', return_value=model), patch('app.qa.agent.MAX_CALLS', 2):
+        with patch('app.qa.agent.get_llm', return_value=model), patch('app.qa.tool_middleware.MAX_CALLS', 2):
             answer = self.wait(self.ask())
         self.assertEqual(answer['status'], 'completed')
         self.assertEqual(len(answer['run']['trace']['tools']), 2)
@@ -202,7 +222,7 @@ class AgentTests(unittest.TestCase):
             """
             await asyncio.sleep(30)
         model = ScriptedModel(responses=[call('search_course', {'query': '进程'}), AIMessage(content='没有依据')])
-        with patch('app.qa.agent.get_llm', return_value=model), patch('app.qa.manager.RunManager.retrieve', side_effect=delayed), patch('app.qa.agent.TOOL_TIMEOUT', .02):
+        with patch('app.qa.agent.get_llm', return_value=model), patch('app.qa.manager.RunManager.retrieve', side_effect=delayed), patch('app.qa.tool_middleware.TOOL_TIMEOUT', .02):
             answer = self.wait(self.ask())
         tool = answer['run']['trace']['tools'][0]
         self.assertEqual(tool['status'], 'failed')
@@ -260,7 +280,7 @@ class AgentTests(unittest.TestCase):
         """验证达到预算后能根据已取得的证据完成回答。"""
         model = ScriptedModel(responses=[call('search_course', {'query': '进程'}),
             call('search_course', {'query': '线程'}, 'second'), AIMessage(content='进程分配资源。[1]')])
-        with patch('app.qa.agent.get_llm', return_value=model), patch('app.qa.agent.MAX_CALLS', 1):
+        with patch('app.qa.agent.get_llm', return_value=model), patch('app.qa.tool_middleware.MAX_CALLS', 1):
             answer = self.wait(self.ask())
         self.assertEqual(answer['status'], 'completed')
         self.assertEqual(len(answer['run']['trace']['tools']), 1)

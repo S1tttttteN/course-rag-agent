@@ -121,8 +121,8 @@ class NaturalAgentTests(unittest.TestCase):
     def setUp(self):
         """安装网络工具替身并创建对话测试数据。"""
         # Unexpected network/cloud activity is a hard test failure.
-        self.web_search = self.enterContext(patch('app.qa.agent.web_search', side_effect=AssertionError('unexpected web search')))
-        self.web_read = self.enterContext(patch('app.qa.agent.web_read', side_effect=AssertionError('unexpected web read')))
+        self.web_search = self.enterContext(patch('app.qa.tools.web_search', side_effect=AssertionError('unexpected web search')))
+        self.web_read = self.enterContext(patch('app.qa.tools.web_read', side_effect=AssertionError('unexpected web read')))
         self.review = self.enterContext(patch('app.qa.agent.publish_checked', side_effect=AssertionError('unexpected strict reviewer')))
         shared.ConversationTests.setUp(self)
 
@@ -413,7 +413,7 @@ class NaturalAgentTests(unittest.TestCase):
         self.web_search.return_value = [SNIPPET]
         model = StreamingModel(responses=[call('search_web', {'query': '公开实验'}),
             call('search_web', {'query': '公开实验'}), AIMessage(content='根据已有资料总结。[1]')])
-        with patch('app.qa.agent.get_llm', return_value=model), patch('app.qa.agent.MAX_CALLS', 1):
+        with patch('app.qa.agent.get_llm', return_value=model), patch('app.qa.tool_middleware.MAX_CALLS', 1):
             answer = self.wait(self.ask(web_search=True))
         self.assertEqual(answer['status'], 'completed')
         self.assertEqual(self.web_search.call_count, 1)
