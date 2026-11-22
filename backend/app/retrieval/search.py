@@ -61,6 +61,22 @@ def search(course_id: str, query: str, top_k=4, semantic=True, rerank=False):
     Raises:
         CourseNotFound: 课程不存在或在检索期间被删除。
     """
+    ranked, trace = rank_candidates(course_id, query, semantic=semantic)
+    return finish_search(course_id, query, ranked, trace, top_k, rerank)
+
+
+def rank_candidates(course_id, query, *, semantic=True, keyword=True):
+    """召回候选并按倒数排名融合，支持评测时单独运行一路召回。
+
+    Args:
+        course_id: 课程 ID。
+        query: 待检索的查询。
+        semantic: 是否召回向量候选。
+        keyword: 是否召回 BM25 候选。
+
+    Returns:
+        初排候选和实际执行步骤，供相同候选池的排序对照复用。
+    """
     with SessionLocal() as session:
         require_course(session, course_id)
         rows = active_chunks(session, course_id)
@@ -87,32 +103,33 @@ def search(course_id: str, query: str, top_k=4, semantic=True, rerank=False):
         "note": "",
     }
     if not records:
-        return {"results": [], "trace": trace}
-    ids, tokens, bm25 = keyword_index(course_id, versions)
-    query_tokens = tokenize(query)
+        return [], trace
     lexical = []
-    if bm25:
-        scores = bm25.get_scores(query_tokens)
-        matching = [
-            position
-            for position, words in enumerate(tokens)
-            if set(words).intersection(query_tokens)
-        ]
-        lexical = [
-            ids[position]
-            for position in sorted(
-                matching, key=lambda position: scores[position], reverse=True
-            )[:20]
-        ]
-        trace["keyword"] = True
+    if keyword:
+        ids, tokens, bm25 = keyword_index(course_id, versions)
+        if bm25:
+            query_tokens = tokenize(query)
+            scores = bm25.get_scores(query_tokens)
+            matching = [
+                position
+                for position, words in enumerate(tokens)
+                if set(words).intersection(query_tokens)
+            ]
+            lexical = [
+                ids[position]
+                for position in sorted(
+                    matching, key=lambda position: scores[position], reverse=True
+                )[:20]
+            ]
+            trace["keyword"] = True
     vector = []
     if semantic:
         try:
             profile = embedding_profile()
             if profiles != {profile}:
-                trace["note"] = (
-                    "嵌入模型配置已变化，请逐份替换或重新处理资料；暂用关键词搜索。"
-                )
+                trace["note"] = "嵌入模型配置已变化，请逐份替换或重新处理资料。"
+                if keyword:
+                    trace["note"] = "嵌入模型配置已变化，请逐份替换或重新处理资料；暂用关键词搜索。"
             else:
                 result = index.collection(course_id, profile).query(
                     query_embeddings=[get_embeddings().embed_query(query)],
@@ -125,9 +142,11 @@ def search(course_id: str, query: str, top_k=4, semantic=True, rerank=False):
                 ]
                 trace["semantic"] = True
         except Exception:
-            trace["note"] = (
-                "语义搜索暂不可用，已使用关键词搜索。请检查嵌入模型配置与网络。"
-            )
+            trace["note"] = "语义搜索暂不可用。请检查嵌入模型配置与网络。"
+            if keyword:
+                trace["note"] = (
+                    "语义搜索暂不可用，已使用关键词搜索。请检查嵌入模型配置与网络。"
+                )
     fusion = {}
     # 用倒数排名融合（RRF）合并两路候选，避免直接比较量纲不同的检索分数。
     for ranking in (vector, lexical):
@@ -137,6 +156,24 @@ def search(course_id: str, query: str, top_k=4, semantic=True, rerank=False):
         records[chunk_id] for chunk_id in sorted(fusion, key=fusion.get, reverse=True)
     ]
     trace["candidates"] = len(ranked)
+    return ranked, trace
+
+
+def finish_search(course_id, query, ranked, trace, top_k, rerank):
+    """完成可选重排、在库校验和截断，保留输入的候选与追踪记录。
+
+    Args:
+        course_id: 课程 ID。
+        query: 用于重排的原始查询。
+        ranked: 初排候选。
+        trace: 初排记录。
+        top_k: 最多返回的片段数。
+        rerank: 是否调用重排服务。
+
+    Returns:
+        最终片段及实际执行的检索步骤。
+    """
+    trace = trace.copy()
     if rerank and ranked:
         if is_available():
             docs, error = rerank_documents(

@@ -161,6 +161,7 @@ class AgentTests(unittest.TestCase):
         self.assertEqual([item['number'] for item in answer['citations']], [1])
         self.assertEqual(len(answer['run']['trace']['tools']), 2)
         self.assertTrue(all(item['status'] == 'completed' for item in answer['run']['trace']['tools']))
+        self.assertTrue(all(item['retrieval']['keyword'] for item in answer['run']['trace']['tools']))
         events = self.client.get(f'{self.path}/runs/{run_id}/events').text
         self.assertEqual(events.count('event: tool'), 4)
         self.assertEqual(answer['run']['trace']['evidence_check']['status'], 'checked')

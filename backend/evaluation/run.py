@@ -20,6 +20,44 @@ ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 
 
+def publish_document(client, course, filename, data):
+    """通过现有入库流程发布评测资料并检查索引状态。"""
+    from app.jobs.indexing import process_version
+
+    url = f"/api/courses/{course}/documents"
+    response = client.post(url, files={"file": (filename, data)})
+    response.raise_for_status()
+    document = response.json()
+    process_version(document["latest"]["id"], Event())
+    response = client.get(url)
+    response.raise_for_status()
+    published = next(item for item in response.json() if item["id"] == document["id"])
+    if not published["usable"]:
+        raise RuntimeError("索引失败，请检查资料格式与嵌入服务：" + filename)
+    return published
+
+
+def run_turn(client, base, body, run_timeout):
+    """提交一轮问答，返回最终消息和从提交到结束的耗时。"""
+    started = time.monotonic()
+    response = client.post(base + "/runs", json=body)
+    response.raise_for_status()
+    run_id = response.json()["id"]
+    deadline = started + run_timeout + 30
+    while time.monotonic() <= deadline:
+        response = client.get(base)
+        response.raise_for_status()
+        answer = next(
+            message for message in response.json()["messages"]
+            if message["run_id"] == run_id and message["role"] == "assistant"
+        )
+        if answer["status"] in ("completed", "failed", "cancelled", "interrupted"):
+            return answer, round(time.monotonic() - started, 3)
+        time.sleep(.2)
+    client.post(base + f"/runs/{run_id}/cancel").raise_for_status()
+    raise TimeoutError("Evaluation run exceeded the configured run budget")
+
+
 def checks(case, answer):
     """对一轮回答运行结构和词组覆盖检查。
 
@@ -70,7 +108,6 @@ def run(args, temporary):
     from app.qa.agent import SYSTEM as AGENT_SYSTEM, STRICT_SYSTEM as STRICT_AGENT_SYSTEM
     from app.core.models import get_active_models, get_llm, RERANK_PROVIDER, RERANK_MODEL, RERANK_PROVIDERS, RUN_TIMEOUT
     from app.db.session import SessionLocal
-    from app.jobs.indexing import process_version
     app.state.indexing_enabled = False
     cases = json.loads((HERE / 'cases.json').read_text(encoding='utf-8'))
     if args.cases:
@@ -102,24 +139,13 @@ def run(args, temporary):
         other = client.post('/api/courses', json={'name': '另一门隔离课程'}).json()['id']
         for path in sorted((HERE / 'fixtures').glob('*.md')):
             data = path.read_bytes()
-            response = client.post(f'/api/courses/{course}/documents', files={'file': (path.name, data)})
-            response.raise_for_status()
-            document = response.json()
-            process_version(document['latest']['id'], Event())
-            state = client.get(f'/api/courses/{course}/documents').json()
-            published = next(item for item in state if item['id'] == document['id'])
-            if not published['usable']:
-                raise RuntimeError('Fixture indexing failed: ' + path.name + '; check embedding configuration.')
+            published = publish_document(client, course, path.name, data)
             if path.name == '实验手册.md' and published['chunk_count'] <= 4:
                 raise RuntimeError('Long-document fixture must exceed one read_document call (4 chunks)')
             report['documents'].append({'name': path.name, 'sha256': hashlib.sha256(data).hexdigest(),
                                         'version_id': published['active_version_id'], 'chunks': published['chunk_count'],
                                         'embedding_profile': published['latest']['embedding_profile']})
-        foreign = client.post(f'/api/courses/{other}/documents', files={'file': ('私有口令.md', '另一门课程的虚构私有核验口令是ORCHID-908。'.encode())}).json()
-        process_version(foreign['latest']['id'], Event())
-        foreign_state = client.get(f'/api/courses/{other}/documents').json()[0]
-        if not foreign_state['usable']:
-            raise RuntimeError('Foreign-course isolation fixture could not be indexed')
+        publish_document(client, other, '私有口令.md', '另一门课程的虚构私有核验口令是ORCHID-908。'.encode())
         save()
         for repeat in range(args.repeats):
             for case_index, case in enumerate(cases):
@@ -129,22 +155,9 @@ def run(args, temporary):
                     conversation = client.post(f'/api/courses/{course}/conversations', json={}).json()['id']
                     base = f'/api/courses/{course}/conversations/{conversation}'
                     for turn_index, question in enumerate(case['turns']):
-                        started = time.monotonic()
-                        response = client.post(base + '/runs', json={'question': question, 'mode': mode, 'top_k': 4,
+                        answer, elapsed = run_turn(client, base, {'question': question, 'mode': mode, 'top_k': 4,
                             'semantic': not args.keyword_only, 'rerank': not args.no_rerank,
-                            'answer_review': args.answer_review, 'web_search': mode == 'agent' and args.web_search})
-                        response.raise_for_status()
-                        run_id = response.json()['id']
-                        deadline = started + RUN_TIMEOUT + 30
-                        while True:
-                            detail = client.get(base).json()
-                            answer = next(message for message in detail['messages'] if message['run_id'] == run_id and message['role'] == 'assistant')
-                            if answer['status'] in ('completed', 'failed', 'cancelled', 'interrupted'):
-                                break
-                            if time.monotonic() > deadline:
-                                client.post(base + f'/runs/{run_id}/cancel').raise_for_status()
-                                raise TimeoutError('Evaluation run exceeded the configured run budget')
-                            time.sleep(.2)
+                            'answer_review': args.answer_review, 'web_search': mode == 'agent' and args.web_search}, RUN_TIMEOUT)
                         with SessionLocal() as session:
                             from app.db.models import Document
                             scoped = all(
@@ -154,7 +167,7 @@ def run(args, temporary):
                         evaluation = checks(case if turn_index == len(case['turns']) - 1 else {}, answer)
                         evaluation['automatic']['citations_belong_to_course'] = scoped
                         item = {'case_id': case['id'], 'category': case['category'], 'repeat': repeat + 1, 'mode': mode,
-                                'turn': turn_index + 1, 'question': question, 'elapsed_seconds': round(time.monotonic() - started, 3),
+                                'turn': turn_index + 1, 'question': question, 'elapsed_seconds': elapsed,
                                 'tool_calls': len(answer['run']['trace'].get('tools', [])), 'answer': answer, 'evaluation': evaluation}
                         report['results'].append(item)
                         save()

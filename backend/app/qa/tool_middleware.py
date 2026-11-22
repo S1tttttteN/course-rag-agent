@@ -1,6 +1,7 @@
 """统一控制 Agent 工具执行的预算、超时和运行记录。"""
 
 import asyncio
+import json
 from time import monotonic
 from uuid import uuid4
 
@@ -79,6 +80,8 @@ async def manage_tool_call(request, handler):
                 record["summary"] = (
                     f"已查阅目录，累计找到 {len(context.catalog_items)} 份资料。"
                 )
+            if not failed and name == "search_course" and isinstance(result, ToolMessage):
+                record["retrieval"] = json.loads(result.content)["retrieval"]
             if failed:
                 result = ToolMessage(
                     content="工具调用失败。检查工具名称和参数，仅使用当前课程返回的资料及版本ID。",
