@@ -194,17 +194,11 @@ class Run(Base):
         id: 问答运行 ID。
         conversation_id: 所属对话 ID。
         question: 用户原始问题。
-        mode: 问答模式。
-        query: 实际用于检索的查询。
         status: 执行状态。
         phase: 当前阶段说明。
         error: 失败或中断说明。
         trace: 序列化为 JSON 的执行摘要。
-        top_k: 检索候选条数。
-        semantic: 语义检索开关，以整数保存。
-        rerank: 重排序开关，以整数保存。
         web_search: 本轮是否允许 Agent 联网。
-        answer_review: 本轮是否在发布正文前核对证据。
         agent_checkpoint_id: 本轮提交的会话检查点 ID。
         created_at: 创建时间。
     """
@@ -225,17 +219,11 @@ class Run(Base):
         ForeignKey("conversations.id", ondelete="CASCADE"), index=True
     )
     question: Mapped[str] = mapped_column(Text)
-    mode: Mapped[str] = mapped_column(String(10), default="rag")
-    query: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(20), default="queued")
     phase: Mapped[str] = mapped_column(String(100), default="等待回答")
     error: Mapped[str] = mapped_column(Text, default="")
     trace: Mapped[str] = mapped_column(Text, default="{}")
-    top_k: Mapped[int] = mapped_column(Integer, default=4)
-    semantic: Mapped[int] = mapped_column(Integer, default=1)
-    rerank: Mapped[int] = mapped_column(Integer, default=1)
     web_search: Mapped[bool] = mapped_column(Boolean, server_default=false())
-    answer_review: Mapped[bool] = mapped_column(Boolean, server_default=false())
     agent_checkpoint_id: Mapped[str | None] = mapped_column(String(36))
     created_at: Mapped[str] = mapped_column(String(40), default=utc_now)
 

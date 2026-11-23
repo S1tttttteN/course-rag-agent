@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { Link, NavLink, useMatch, useNavigate } from 'react-router-dom';
-import { ArrowUp, BookOpen, FileText, LoaderCircle, MessageSquare, Pencil, Plus, Settings2, Square, Trash2 } from 'lucide-react';
+import { ArrowUp, BookOpen, FileText, LoaderCircle, MessageSquare, Pencil, Plus, Square, Trash2 } from 'lucide-react';
 import { conversationsApi } from '../../api/conversations';
 import { Dialog } from '../../components/Dialog';
 import { ReadingPanel } from '../../components/ReadingPanel';
@@ -14,18 +14,12 @@ import { SourceDetails } from './SourceDetails';
 import { rememberConversation } from './recentConversation';
 
 const answerPreferencesKey = 'course-study-room.answer-preferences';
-const defaultAnswerPreferences = { web_search: false, answer_review: false };
-type AnswerPreferences = typeof defaultAnswerPreferences;
-
-function readAnswerPreferences(): AnswerPreferences {
+function readWebSearchPreference() {
   try {
     const saved = JSON.parse(localStorage.getItem(answerPreferencesKey) ?? 'null');
-    return {
-      web_search: saved?.web_search === true,
-      answer_review: saved?.answer_review === true,
-    };
+    return saved?.web_search === true;
   } catch {
-    return defaultAnswerPreferences;
+    return false;
   }
 }
 
@@ -48,11 +42,7 @@ export function ChatWorkspace({ courseId, courseName, navigationTarget, onNaviga
   const [actionError, setActionError] = useState('');
   const [busy, setBusy] = useState(false);
   const [draft, setDraft] = useState('');
-  const [topK, setTopK] = useState(4);
-  const [semantic, setSemantic] = useState(true);
-  const [rerank, setRerank] = useState(true);
-  const [mode, setMode] = useState<'rag' | 'agent'>('agent');
-  const [answerPreferences, setAnswerPreferences] = useState(readAnswerPreferences);
+  const [webSearch, setWebSearch] = useState(readWebSearchPreference);
   const [connectionNote, setConnectionNote] = useState('');
   const [deleting, setDeleting] = useState<Conversation | null>(null);
   const [renaming, setRenaming] = useState<Conversation | null>(null);
@@ -77,16 +67,13 @@ export function ChatWorkspace({ courseId, courseName, navigationTarget, onNaviga
     ? documentReaderFormat(citation.source) : null;
   const viewingCitationOriginal = showCitationOriginal && citationFormat !== null;
   const settingsDisabled = busy || !!active;
-  const webSearch = mode === 'agent' && answerPreferences.web_search;
-  const answerReview = active?.trace.answer_review ?? answerPreferences.answer_review;
 
-  function changeAnswerPreference(key: keyof AnswerPreferences, checked: boolean) {
-    const next = { ...answerPreferences, [key]: checked };
-    setAnswerPreferences(next);
+  function changeWebSearch(checked: boolean) {
+    setWebSearch(checked);
     try {
-      localStorage.setItem(answerPreferencesKey, JSON.stringify(next));
+      localStorage.setItem(answerPreferencesKey, JSON.stringify({ web_search: checked }));
     } catch {
-      // Keep the choice for this page if browser storage is unavailable.
+      // 浏览器存储不可用时保留当前页面中的选择。
     }
   }
 
@@ -119,10 +106,8 @@ export function ChatWorkspace({ courseId, courseName, navigationTarget, onNaviga
     void conversationsApi.config().then(value => {
       if (ignore) return;
       setConfig(value);
-      setTopK(value.top_k);
-      setRerank(value.rerank_available);
     }).catch(error => {
-      if (!ignore) setConfigError(error instanceof Error ? error.message : '无法读取回答设置。');
+      if (!ignore) setConfigError(error instanceof Error ? error.message : '无法读取模型配置。');
     });
     return () => { ignore = true; };
   }, [showingLibrary, config]);
@@ -204,12 +189,7 @@ export function ChatWorkspace({ courseId, courseName, navigationTarget, onNaviga
       }
       await conversationsApi.ask(courseId, id, {
         question: question.trim(),
-        top_k: topK,
-        semantic,
-        rerank,
-        mode,
         web_search: webSearch,
-        answer_review: answerPreferences.answer_review,
       });
       if (alive.current && routeRef.current === origin) {
         setDraft('');
@@ -317,8 +297,13 @@ export function ChatWorkspace({ courseId, courseName, navigationTarget, onNaviga
           <Link to={`/courses/${courseId}/documents`} className="text-button"><FileText size={15} />查看课程资料</Link>
         </div> : currentDetail?.messages.map(message => <article className={`chat-message ${message.role}`} key={message.id}><div className="message-author">{message.role === 'user' ? '你的问题' : <><BookOpen size={14} />课程助手</>}</div>
           {message.role === 'user' ? <p className="user-text">{message.content}</p> : <>
-            {message.run && <span className="answer-mode">{message.run.mode === 'agent' ? 'Agent · 自主查阅' : 'RAG · 固定检索'}</span>}
-            {!!message.run?.trace.tools?.length && <details className="tool-records" open={active?.id === message.run_id}><summary>查阅记录 · {message.run.trace.tools.length} / {message.run.trace.tool_limit ?? 8}</summary><ol>{message.run.trace.tools.map(tool => <li key={tool.id} className={`tool-record ${tool.status}`}><div><strong>{tool.number}. {tool.label}</strong><span>{tool.status === 'running' ? '执行中' : tool.status === 'completed' ? '完成' : tool.status === 'limited' ? '已达上限' : tool.status === 'interrupted' ? '已中断' : '未成功'}{tool.duration_ms !== null && ` · ${(tool.duration_ms / 1000).toFixed(1)}s`}</span></div>{tool.input.query && <p>{tool.input.query}</p>}{tool.name === 'read_document' && <p>片段偏移 {tool.input.offset ?? '0'} · 读取 {tool.input.limit ?? '3'} 段</p>}<small>{tool.summary}</small></li>)}</ol></details>}
+            {!!message.run?.trace.tools?.length && <details className="tool-records" open={active?.id === message.run_id}><summary>查阅记录 · {message.run.trace.tools.length} / {message.run.trace.tool_limit ?? 8}</summary><ol>{message.run.trace.tools.map(tool => <li key={tool.id} className={`tool-record ${tool.status}`}><div><strong>{tool.number}. {tool.label}</strong><span>{tool.status === 'running' ? '执行中' : tool.status === 'completed' ? '完成' : tool.status === 'limited' ? '已达上限' : tool.status === 'interrupted' ? '已中断' : '未成功'}{tool.duration_ms !== null && ` · ${(tool.duration_ms / 1000).toFixed(1)}s`}</span></div>{tool.input.query && <p>{tool.input.query}</p>}{tool.name === 'read_document' && <p>片段偏移 {tool.input.offset ?? '0'} · 读取 {tool.input.limit ?? '3'} 段</p>}<small>{tool.summary}</small>
+                {tool.retrieval && <p>{[
+                  tool.retrieval.keyword && '关键词检索',
+                  tool.retrieval.semantic && '语义检索',
+                  tool.retrieval.reranked && '相关度重排',
+                ].filter(Boolean).join(' · ')}</p>}
+                {tool.retrieval?.note && <p>{tool.retrieval.note}</p>}</li>)}</ol></details>}
             {message.content ? <Answer text={message.content} citations={message.citations}
               selectedCitationId={selection?.runId === message.run_id ? selection.citation.id : undefined}
               onCitation={(item, event) => void openCitation(message, item, event.currentTarget)} />
@@ -329,9 +314,6 @@ export function ChatWorkspace({ courseId, courseName, navigationTarget, onNaviga
               <FileText size={15} />参考来源 <span>{message.citations.length}</span>
             </button>}
             {message.run?.trace.unknown_citations?.length ? <p className="message-warning">部分引用编号未匹配，请结合可用的参考来源核对。</p> : null}
-            {message.run?.trace.note && <p className="subtle-note">{message.run.trace.note}</p>}
-            {message.run?.trace.evidence_check?.status === 'checked' && <p className="subtle-note">已核对结论与原文摘录，保留 {message.run.trace.evidence_check.kept} 条；核对仍可能遗漏，请结合引用判断。</p>}
-            {message.run?.trace.rewrite_note && <p className="subtle-note">{message.run.trace.rewrite_note}</p>}
             {['failed', 'cancelled', 'interrupted'].includes(message.status) && <p className="message-warning">{message.status === 'cancelled' ? '已停止。部分内容已保存，不作为后续完整问答依据。' : message.run?.error || '回答未完成，请重新提问。'}</p>}
           </>}
         </article>)}
@@ -339,29 +321,13 @@ export function ChatWorkspace({ courseId, courseName, navigationTarget, onNaviga
       <div className="composer-area">{active && <p className="run-status" role="status"><LoaderCircle size={13} className="spin" />{active.phase}</p>}{connectionNote && <p className="subtle-note" role="status">{connectionNote}</p>}{actionError && !deleting && !renaming && <p className="error" role="alert">{actionError}</p>}
         <form onSubmit={event => { event.preventDefault(); void send(); }} className="chat-composer"><textarea aria-label="课程问题" placeholder="问一个课程问题，或继续追问…" maxLength={4000} rows={2} value={draft} onChange={event => setDraft(event.target.value)} disabled={busy || !!active || loading || !!error} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} />{active ? <button type="button" className="send-button stop-button" onClick={() => void cancel()} disabled={active.status === 'cancelling'} aria-label="停止回答"><Square size={16} fill="currentColor" /></button> : <button type="submit" className="send-button" disabled={!draft.trim() || busy || loading || !!error} aria-label="发送问题">{busy ? <LoaderCircle size={18} className="spin" /> : <ArrowUp size={20} />}</button>}</form>
         <div className="composer-foot">
-          <div className="mode-picker" role="group" aria-label="回答模式">
-            <button type="button" aria-pressed={mode === 'agent'} disabled={settingsDisabled} onClick={() => setMode('agent')}>Agent</button>
-            <button type="button" aria-pressed={mode === 'rag'} disabled={settingsDisabled} onClick={() => setMode('rag')}>固定 RAG</button>
-          </div>
-          <span className="composer-status">{mode === 'rag' ? '仅课程资料' : webSearch ? '可按需联网' : '联网关闭'} · {answerReview ? '正文核对后显示' : '回答实时显示'}</span>
-          <details className="chat-settings">
-            <summary><Settings2 size={15} />回答设置</summary>
-            <div>
-              <p>{config ? `${config.provider || '未配置'} / ${config.model || '未选择'}` : '读取模型配置…'}</p>
-              <label>每次检索片段数 {mode === 'agent' ? Math.min(topK, 4) : topK}<input type="range" min="1" max={mode === 'agent' ? '4' : '10'} value={mode === 'agent' ? Math.min(topK, 4) : topK} disabled={settingsDisabled} onChange={event => setTopK(Number(event.target.value))} /></label>
-              <label><input type="checkbox" checked={semantic} disabled={settingsDisabled} onChange={event => setSemantic(event.target.checked)} />结合语义检索</label>
-              <label><input type="checkbox" checked={rerank} disabled={settingsDisabled || !config?.rerank_available} onChange={event => setRerank(event.target.checked)} />相关度重排</label>
-              <label>
-                <input type="checkbox" checked={webSearch} disabled={settingsDisabled || mode === 'rag'} aria-describedby="web-search-note" onChange={event => changeAnswerPreference('web_search', event.target.checked)} />
-                允许 Agent 联网
-              </label>
-              <p id="web-search-note">{mode === 'rag' ? '仅 Agent 模式可用。' : '搜索词可能包含问题或资料信息，并发送给搜索服务。'}</p>
-              <label>
-                <input type="checkbox" checked={answerPreferences.answer_review} disabled={settingsDisabled} onChange={event => changeAnswerPreference('answer_review', event.target.checked)} />
-                生成后核对证据
-              </label>
-            </div>
-          </details>
+          <label className="web-search-option">
+            <input type="checkbox" checked={active?.web_search ?? webSearch} disabled={settingsDisabled}
+              aria-describedby="web-search-note" onChange={event => changeWebSearch(event.target.checked)} />
+            允许联网
+          </label>
+          <span id="web-search-note">开启后，搜索词可能包含问题或资料信息并发送给搜索服务。</span>
+          {config?.configured && <span className="composer-model">{config.provider} / {config.model}</span>}
         </div>
       </div>
     </section>

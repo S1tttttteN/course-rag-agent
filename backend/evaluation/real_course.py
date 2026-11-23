@@ -15,6 +15,7 @@ BACKEND = Path(__file__).resolve().parents[1]
 if __package__ is None:
     sys.path.insert(0, str(BACKEND))
 
+from evaluation.run import QA_CONFIGS, scenario_turns
 from evaluation.course_dataset import (
     freeze,
     load_cases,
@@ -27,8 +28,7 @@ from evaluation.course_dataset import (
 
 ROOT = BACKEND.parent
 WORK = ROOT / ".cache" / "os-benchmark"
-TOP_K = 4
-QA_CONFIGS = (("rag", "rag", False), ("agent", "agent", False), ("rag_rerank", "rag", True))
+RETRIEVAL_TOP_K = 4
 
 
 def utc_now():
@@ -101,7 +101,7 @@ def publish_snapshot(client, snapshot, manifest):
 
 def retrieval_scores(result_ids, groups):
     """计算必需证据组的 Recall@4 与首个有效片段的 MRR@4。"""
-    top = result_ids[:TOP_K]
+    top = result_ids[:RETRIEVAL_TOP_K]
     hits = set(top)
     first = next(
         (rank for rank, identifier in enumerate(top, 1) if any(identifier in group for group in groups)),
@@ -124,7 +124,7 @@ def run_retrieval_case(course, case, groups, case_index):
         for rerank in ((False, True) if config == "hybrid" else (False,)):
             phase_start = utc_now() if rerank else start_time
             finishing = monotonic()
-            result = finish_search(course, query, ranked, trace, TOP_K, rerank)
+            result = finish_search(course, query, ranked, trace, RETRIEVAL_TOP_K, rerank)
             elapsed = round(recall_seconds + monotonic() - finishing, 4)
             stopped = utc_now()
             actual = result["trace"]
@@ -145,48 +145,38 @@ def run_retrieval_case(course, case, groups, case_index):
 
 
 def run_qa_case(client, course, case, repeat, offset, timeout):
-    """在独立会话中运行每个配置，保持多轮用例的连续上下文。"""
-    from evaluation.run import run_turn
+    """用相同检索策略和独立上下文运行两组问答。"""
+    from app.retrieval.reranker import is_available
 
+    rerank = is_available()
+    modes = QA_CONFIGS[offset:] + QA_CONFIGS[:offset]
+    turns = case["turns"]
     rows = []
-    for config, mode, rerank in QA_CONFIGS[offset:] + QA_CONFIGS[:offset]:
-        base = f"/api/courses/{course}/conversations"
-        response = client.post(base, json={})
-        response.raise_for_status()
-        url = f"{base}/{response.json()['id']}"
-        previous_completed = True
-        for turn_number, turn in enumerate(case["turns"], 1):
-            started = utc_now()
-            if previous_completed:
-                try:
-                    answer, elapsed = run_turn(client, url, {
-                        "question": turn["question"], "mode": mode, "top_k": TOP_K,
-                        "semantic": True, "rerank": rerank, "web_search": False, "answer_review": False,
-                    }, timeout)
-                except TimeoutError:
-                    answer, elapsed = {"status": "timeout"}, None
-            else:
-                answer, elapsed = {"status": "skipped"}, None
-            previous_completed = answer["status"] == "completed"
-            trace = answer.get("run", {}).get("trace", {})
-            if mode == "agent":
-                searches = [tool for tool in trace.get("tools", []) if tool["name"] == "search_course"]
-                degraded = any(
-                    tool["status"] != "completed" or not tool.get("retrieval", {}).get("semantic")
-                    for tool in searches
-                ) if searches else None
-            else:
-                degraded = None
-                if "semantic" in trace:
-                    degraded = not trace["semantic"] or (
-                        rerank and bool(trace["candidates"]) and not trace["reranked"]
-                    )
-            rows.append({
-                "id": case["id"], "category": case["category"], "configuration": config,
-                "repeat": repeat, "turn": turn_number, **turn, "answer": answer, "degraded": degraded,
-                "started_at": started, "ended_at": utc_now(), "elapsed_seconds": elapsed,
-            })
+    for mode, index, answer, elapsed, started, ended in scenario_turns(
+        client, course, [turn["question"] for turn in turns], modes, timeout,
+    ):
+        trace = answer.get("run", {}).get("trace", {})
+        if mode == "agent":
+            tools = [tool for tool in trace.get("tools", []) if tool["name"] == "search_course"]
+            degraded = any(
+                tool["status"] != "completed" or retrieval_degraded(tool.get("retrieval", {}), rerank)
+                for tool in tools
+            ) if tools else None
+        else:
+            degraded = retrieval_degraded(trace, rerank) if "semantic" in trace else None
+        rows.append({
+            "id": case["id"], "category": case["category"], "configuration": mode,
+            "repeat": repeat, "turn": index + 1, **turns[index], "answer": answer,
+            "degraded": degraded, "started_at": started, "ended_at": ended, "elapsed_seconds": elapsed,
+        })
     return rows
+
+
+def retrieval_degraded(trace, rerank):
+    """根据执行记录识别有候选时的向量或重排降级。"""
+    return bool(trace.get("candidates")) and (
+        not trace.get("semantic") or (rerank and not trace.get("reranked"))
+    )
 
 
 def run_experiment(args, manifest, retrieval, qa, temporary):
@@ -196,7 +186,7 @@ def run_experiment(args, manifest, retrieval, qa, temporary):
     os.environ["CHUNK_OVERLAP"] = str(manifest["chunk_overlap"])
     from fastapi.testclient import TestClient
     from langsmith import tracing_context
-    from app.core.models import RUN_TIMEOUT, embedding_profile, get_active_models
+    from app.core.models import RUN_TIMEOUT, TOP_K, embedding_profile, get_active_models
     from app.main import app
     from app.retrieval.reranker import status as reranker_status
 
@@ -207,18 +197,19 @@ def run_experiment(args, manifest, retrieval, qa, temporary):
         retrieval = retrieval[:1]
         qa = [next(case for case in qa if case["category"] == "followup")]
     repeats = 1 if args.smoke else args.repeats
+    reranker = reranker_status()
     report = {
         "status": "running", "run_id": uuid4().hex, "application_version": app.version,
         "manifest": manifest,
         "cases_sha256": hashlib.sha256(args.cases.read_bytes()).hexdigest(),
-        "models": {**get_active_models(), "reranker": reranker_status()},
+        "models": {**get_active_models(), "reranker": reranker},
         "parameters": {
             "repeats": repeats, "workers": args.workers, "top_k": TOP_K, "smoke": args.smoke,
-            "web_search": False, "answer_review": False,
+            "retrieval_top_k": RETRIEVAL_TOP_K, "web_search": False,
             "qa": {
-                config: {"mode": mode, "semantic": True, "rerank": rerank}
-                for config, mode, rerank in QA_CONFIGS
+                mode: {"semantic": True, "rerank": reranker["enabled"]} for mode in QA_CONFIGS
             },
+            "timing": {"rag": "in_process", "agent": "http_polling"},
         },
         "retrieval": [], "qa": [],
     }

@@ -1,31 +1,22 @@
-"""调度后台问答任务，按运行配置执行固定 RAG 或 Agent 并持久化进度。"""
+"""调度后台 Agent 问答任务并控制其运行状态。"""
 
 import asyncio
-from contextlib import aclosing
 import logging
 from traceback import extract_tb, format_list
 
 from sqlalchemy import select
 
 from app.core.locks import catalog_lock
-from app.core.models import get_llm, RUN_TIMEOUT
-from app.db.models import Conversation, Document, Run
+from app.core.models import RUN_TIMEOUT
+from app.db.models import Conversation, Run
 from app.db.session import SessionLocal
-from app.qa.rag import answer_messages, rewrite_query, text_content
-from app.qa.metrics import RunUsage
-from app.qa.evidence import EvidenceCheckError, publish_checked
-from app.qa.history import load_history, rag_history
-from app.retrieval.search import search
+from app.qa.agent import AnswerLimit, execute_agent
+from app.qa.history import load_history, recent_history
+from app.retrieval.search import search_course_material
 from app.services import runs
 from app.services.conversations import ACTIVE, event
 
 log = logging.getLogger(__name__)
-
-
-class AnswerLimit(Exception):
-    """回答正文或模型输出达到长度上限时抛出的异常。"""
-
-    pass
 
 
 class RunManager:
@@ -106,16 +97,17 @@ class RunManager:
         task.add_done_callback(ended)
         return await asyncio.shield(task)
 
-    async def retrieve(self, *args):
+    async def retrieve(self, course_id, query):
         """在线程中执行课程检索。
 
         Args:
-            args: 按顺序传入课程 ID、查询、结果上限、语义检索和重排序选项。
+            course_id: 当前课程 ID。
+            query: 检索问题。
 
         Returns:
             包含检索结果与执行摘要的字典。
         """
-        return await self.offload(search, *args)
+        return await self.offload(search_course_material, course_id, query)
 
     async def execute(self, run_id):
         """按运行配置执行问答并持久化正文、事件及终态。
@@ -123,7 +115,6 @@ class RunManager:
         Args:
             run_id: 问答运行 ID。
         """
-        buffer = ""
         try:
             async with self.semaphore, asyncio.timeout(RUN_TIMEOUT):
                 with SessionLocal() as session:
@@ -133,113 +124,16 @@ class RunManager:
                     conversation = session.get(Conversation, run.conversation_id)
                     course_id, conversation_id = conversation.course_id, conversation.id
                     question = run.question
-                    top_k, semantic, rerank = (
-                        run.top_k,
-                        bool(run.semantic),
-                        bool(run.rerank),
-                    )
-                    mode = run.mode
-                    web_search, answer_review = run.web_search, run.answer_review
-                    has_sources = (
-                        session.scalar(
-                            select(Document.id)
-                            .where(
-                                Document.course_id == course_id,
-                                Document.active_version_id.is_not(None),
-                            )
-                            .limit(1)
-                        )
-                        is not None
-                    )
-                config, saved, additions = await load_history(self.checkpointer, conversation_id, run_id)
-                history = rag_history(saved + additions)
-                if mode == "agent":
-                    from app.qa.agent import execute_agent
-
-                    checkpoint_id = await execute_agent(
-                        self,
-                        run_id,
-                        course_id,
-                        conversation_id,
-                        question,
-                        history,
-                        config,
-                        saved,
-                        additions,
-                        top_k,
-                        semantic,
-                        rerank,
-                        web_search=web_search,
-                        answer_review=answer_review,
-                    )
-                    runs.finish(run_id, "completed", agent_checkpoint_id=checkpoint_id)
-                    return
-                query, rewrite_note = question, ""
-                usage = RunUsage(run_id)
-                llm = None
-                if history and has_sources:
-                    if not runs.status(run_id, "正在理解追问"):
-                        return
-                    llm = get_llm()
-                    query, rewrite_note = await rewrite_query(
-                        llm, question, history, [usage]
-                    )
-                if not runs.status(run_id, "正在检索课程资料", query=query):
-                    return
-                result = await self.retrieve(course_id, query, top_k, semantic, rerank)
-                trace = {
-                    **result["trace"],
-                    "history_turns": sum(message.type == "ai" for message in history),
-                    "rewrite_note": rewrite_note,
-                    "mode": "rag",
-                }
-                if not runs.status(run_id, "正在核对参考片段", trace=trace):
-                    return
-                sources = runs.snapshot(run_id, result["results"])
-                if not sources and answer_review:
-                    runs.append(
-                        run_id,
-                        "当前课程资料中未找到足够依据。请补充相关资料，或换用资料中的关键词重新提问。",
-                    )
-                    runs.finish(run_id, "completed")
-                    return
-                if not runs.status(run_id, "正在生成回答"):
-                    return
-                llm = llm or get_llm()
-                answer_length = 0
-                # 核对模式先缓存模型草稿，只有通过核对的内容才进入前端事件流。
-                async with aclosing(
-                    llm.astream(
-                        answer_messages(question, history, sources, answer_review=answer_review),
-                        config={"callbacks": [usage]},
-                    )
-                ) as stream:
-                    async for chunk in stream:
-                        text = text_content(chunk)
-                        buffer += text
-                        answer_length += len(text)
-                        if (
-                            answer_length > 20000
-                            or getattr(chunk, "response_metadata", {}).get(
-                                "finish_reason"
-                            )
-                            in {"length", "max_tokens"}
-                            or getattr(chunk, "response_metadata", {}).get(
-                                "done_reason"
-                            )
-                            == "length"
-                        ):
-                            raise AnswerLimit()
-                        if not answer_review and buffer:
-                            if not runs.append(run_id, buffer):
-                                return
-                            buffer = ""
-                if not answer_length:
-                    raise ValueError("empty model response")
-                if answer_review:
-                    await publish_checked(llm, run_id, question, buffer, sources, usage)
-                buffer = ""
-                runs.finish(run_id, "completed")
+                    web_search = run.web_search
+                config, saved, additions = await load_history(
+                    self.checkpointer, conversation_id, run_id
+                )
+                checkpoint_id = await execute_agent(
+                    self, run_id, course_id, conversation_id, question,
+                    recent_history(saved + additions), config, saved, additions,
+                    web_search=web_search,
+                )
+                runs.finish(run_id, "completed", agent_checkpoint_id=checkpoint_id)
         except asyncio.CancelledError:
             runs.finish(
                 run_id,
@@ -255,12 +149,6 @@ class RunManager:
                 run_id,
                 "failed",
                 "回答达到长度上限，请缩小问题范围后重试。已发布内容会保留。",
-            )
-        except EvidenceCheckError:
-            runs.finish(
-                run_id,
-                "failed",
-                "回答的证据核对未完成，未发布草稿。已保留参考片段，请稍后重试。",
             )
         except Exception as error:
             # 只保留异常类型和堆栈位置，避免把服务商响应或凭据写入日志。

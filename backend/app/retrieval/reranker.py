@@ -29,11 +29,8 @@ from app.core.models import (
 _MAX_CANDIDATES = 100
 
 
-def status(rerank_on: bool = None) -> dict:
-    """返回重排功能的可用状态，供界面展示。
-
-    Args:
-        rerank_on: 界面开关状态，为 None 时只检查服务商配置。
+def status() -> dict:
+    """检查后端重排服务配置。
 
     Returns:
         包含启用状态、服务商、模型名和不可用原因的字典。
@@ -69,10 +66,10 @@ def status(rerank_on: bool = None) -> dict:
         }
 
     return {
-        "enabled": bool(rerank_on) if rerank_on is not None else True,
+        "enabled": True,
         "provider": RERANK_PROVIDER,
         "model": model,
-        "reason": "" if rerank_on is None or rerank_on else "界面开关已关闭重排",
+        "reason": "",
     }
 
 

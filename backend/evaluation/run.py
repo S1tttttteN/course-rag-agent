@@ -4,6 +4,7 @@ Usage: backend/.venv/Scripts/python.exe backend/evaluation/run.py
 Requires requirements-dev.txt for FastAPI's TestClient. No live server required.
 """
 import argparse
+import asyncio
 from datetime import datetime, timezone
 import hashlib
 import importlib.metadata
@@ -18,6 +19,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
+QA_CONFIGS = ('rag', 'agent')
 
 
 def publish_document(client, course, filename, data):
@@ -58,6 +60,45 @@ def run_turn(client, base, body, run_timeout):
     raise TimeoutError("Evaluation run exceeded the configured run budget")
 
 
+def scenario_turns(client, course, questions, modes, timeout):
+    """运行同一场景的两种配置，每组独立保存已完成问答。
+
+    Args:
+        client: 临时评测应用的 HTTP 客户端。
+        course: 临时课程 ID。
+        questions: 按对话顺序排列的问题。
+        modes: 基线和 Agent 的执行顺序。
+        timeout: 单轮问答超时时间。
+
+    Yields:
+        配置、轮次下标、回答记录、耗时及起止时间。失败后的追问标为跳过。
+    """
+    from evaluation.fixed_rag import run_fixed_turn
+
+    for mode in modes:
+        history = []
+        base = f"/api/courses/{course}/conversations"
+        if mode == "agent":
+            response = client.post(base, json={})
+            response.raise_for_status()
+            base = f"{base}/{response.json()['id']}"
+        previous_completed = True
+        for index, question in enumerate(questions):
+            started_at = datetime.now(timezone.utc).isoformat()
+            if not previous_completed:
+                answer, elapsed = {"status": "skipped"}, None
+            elif mode == "agent":
+                started = time.monotonic()
+                try:
+                    answer, elapsed = run_turn(client, base, {"question": question}, timeout)
+                except TimeoutError:
+                    answer, elapsed = {"status": "timeout"}, round(time.monotonic() - started, 3)
+            else:
+                answer, elapsed = asyncio.run(run_fixed_turn(course, question, history, timeout))
+            previous_completed = answer["status"] == "completed"
+            yield mode, index, answer, elapsed, started_at, datetime.now(timezone.utc).isoformat()
+
+
 def checks(case, answer):
     """对一轮回答运行结构和词组覆盖检查。
 
@@ -68,14 +109,14 @@ def checks(case, answer):
     Returns:
         自动检查项、词组覆盖率和留待填写的人工评分字段。
     """
-    content = answer['content']
-    citations = answer['citations']
+    content = answer.get('content', '')
+    citations = answer.get('citations', [])
     groups = case.get('expected_groups', [])
     coverage = [any(term.lower() in content.lower() for term in group) for group in groups]
     gap = bool(re.search(r'未找到|未取得足够依据|没有.{0,15}(提供|依据|资料)|未.{0,15}(提供|记载|提及)|资料.{0,12}(不足|未包含|未提供)', content))
     structural = {
         'completed': answer['status'] == 'completed',
-        'citation_numbers_registered': not answer['run']['trace'].get('unknown_citations'),
+        'citation_numbers_registered': not answer.get('run', {}).get('trace', {}).get('unknown_citations'),
         'no_forbidden_marker': all(term not in content for term in case.get('forbidden', [])),
         'gap_when_expected': gap if case.get('expect_gap') else None,
         'has_citation_for_expected_facts': bool(citations) if groups else None,
@@ -104,10 +145,11 @@ def run(args, temporary):
     sys.path.insert(0, str(ROOT / 'backend'))
     from fastapi.testclient import TestClient
     from app.main import app
-    from app.qa.evidence import SYSTEM as REVIEW_SYSTEM, REVIEW_TIMEOUT, review_options
-    from app.qa.agent import SYSTEM as AGENT_SYSTEM, STRICT_SYSTEM as STRICT_AGENT_SYSTEM
-    from app.core.models import get_active_models, get_llm, RERANK_PROVIDER, RERANK_MODEL, RERANK_PROVIDERS, RUN_TIMEOUT
+    from app.qa.agent import SYSTEM as AGENT_SYSTEM
+    from app.core.models import RUN_TIMEOUT, TOP_K, get_active_models
+    from app.db.models import Document
     from app.db.session import SessionLocal
+    from app.retrieval.reranker import status as reranker_status
     app.state.indexing_enabled = False
     cases = json.loads((HERE / 'cases.json').read_text(encoding='utf-8'))
     if args.cases:
@@ -117,18 +159,28 @@ def run(args, temporary):
             raise ValueError('Unknown case IDs: ' + ', '.join(sorted(unknown)))
         cases = [case for case in cases if case['id'] in requested]
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    report = {'schema_version': 2, 'application_version': app.version, 'created_at': datetime.now(timezone.utc).isoformat(),
-              'fixture_only': True, 'models': {**get_active_models(), 'rerank_provider': RERANK_PROVIDER,
-                  'rerank_model': RERANK_MODEL or RERANK_PROVIDERS.get(RERANK_PROVIDER, {}).get('default_model', '')},
-              'packages': {name: importlib.metadata.version(name) for name in ('langchain', 'langchain-openai', 'langgraph', 'chromadb')},
-              'parameters': {'top_k': 4, 'chunk_size': 250, 'chunk_overlap': 40, 'evidence_review': args.answer_review, 'web_search': args.web_search,
-                  'semantic': not args.keyword_only, 'rerank': not args.no_rerank, 'repeats': args.repeats},
-              'protocol': {'cases_sha256': hashlib.sha256((HERE / 'cases.json').read_bytes()).hexdigest(),
-                  'agent_prompt_sha256': hashlib.sha256((STRICT_AGENT_SYSTEM if args.answer_review else AGENT_SYSTEM).encode()).hexdigest(),
-                  'review_prompt_sha256': hashlib.sha256(REVIEW_SYSTEM.encode()).hexdigest(), 'review_timeout_seconds': REVIEW_TIMEOUT,
-                  'review_request_options': review_options(get_llm())},
-              'documents': [], 'results': [], 'status': 'running',
-              'limitations': ['自动词组覆盖不是事实正确率。', '尚未填写人工证据评分，不能据此宣称Agent优于RAG。', '用量仅记录服务商返回数据，不估计费用。']}
+    report = {
+        'schema_version': 3,
+        'application_version': app.version,
+        'created_at': datetime.now(timezone.utc).isoformat(),
+        'fixture_only': True,
+        'models': {**get_active_models(), 'reranker': reranker_status()},
+        'packages': {
+            name: importlib.metadata.version(name)
+            for name in ('langchain', 'langchain-openai', 'langgraph', 'chromadb')
+        },
+        'parameters': {
+            'top_k': TOP_K, 'chunk_size': 250, 'chunk_overlap': 40,
+            'web_search': False, 'semantic': True, 'repeats': args.repeats,
+        },
+        'protocol': {
+            'cases_sha256': hashlib.sha256((HERE / 'cases.json').read_bytes()).hexdigest(),
+            'agent_prompt_sha256': hashlib.sha256(AGENT_SYSTEM.encode()).hexdigest(),
+            'timing': {'rag': 'in_process', 'agent': 'http_polling'},
+        },
+        'documents': [], 'results': [], 'status': 'running',
+        'limitations': ['自动词组覆盖仅衡量预期词组是否出现。', '回答质量等待人工证据评分。'],
+    }
 
     def save():
         """将当前进度和结果写入 JSON 报告。"""
@@ -150,28 +202,27 @@ def run(args, temporary):
         for repeat in range(args.repeats):
             for case_index, case in enumerate(cases):
                 # Alternate order to reduce consistent warm-cache / provider-load bias.
-                modes = ('rag', 'agent') if (repeat + case_index) % 2 == 0 else ('agent', 'rag')
-                for mode in modes:
-                    conversation = client.post(f'/api/courses/{course}/conversations', json={}).json()['id']
-                    base = f'/api/courses/{course}/conversations/{conversation}'
-                    for turn_index, question in enumerate(case['turns']):
-                        answer, elapsed = run_turn(client, base, {'question': question, 'mode': mode, 'top_k': 4,
-                            'semantic': not args.keyword_only, 'rerank': not args.no_rerank,
-                            'answer_review': args.answer_review, 'web_search': mode == 'agent' and args.web_search}, RUN_TIMEOUT)
-                        with SessionLocal() as session:
-                            from app.db.models import Document
-                            scoped = all(
-                                (bool(item.get('url')) if item.get('kind') in {'web_snippet', 'web_page'} else
-                                 ((source := session.get(Document, item['document_id'])) is not None and source.course_id == course))
-                                for item in answer['citations'])
-                        evaluation = checks(case if turn_index == len(case['turns']) - 1 else {}, answer)
-                        evaluation['automatic']['citations_belong_to_course'] = scoped
-                        item = {'case_id': case['id'], 'category': case['category'], 'repeat': repeat + 1, 'mode': mode,
-                                'turn': turn_index + 1, 'question': question, 'elapsed_seconds': elapsed,
-                                'tool_calls': len(answer['run']['trace'].get('tools', [])), 'answer': answer, 'evaluation': evaluation}
-                        report['results'].append(item)
-                        save()
-                        print(f"{case['id']} / {mode} / turn {turn_index + 1}: {answer['status']} ({item['elapsed_seconds']}s, tools={item['tool_calls']})", flush=True)
+                modes = QA_CONFIGS if (repeat + case_index) % 2 == 0 else QA_CONFIGS[::-1]
+                for mode, turn_index, answer, elapsed, _, _ in scenario_turns(
+                    client, course, case['turns'], modes, RUN_TIMEOUT,
+                ):
+                    with SessionLocal() as session:
+                        scoped = all(
+                            (source := session.get(Document, item['document_id'])) is not None
+                            and source.course_id == course
+                            for item in answer.get('citations', [])
+                        )
+                    evaluation = checks(case if turn_index == len(case['turns']) - 1 else {}, answer)
+                    evaluation['automatic']['citations_belong_to_course'] = scoped
+                    tools = answer.get('run', {}).get('trace', {}).get('tools', [])
+                    report['results'].append({
+                        'case_id': case['id'], 'category': case['category'], 'repeat': repeat + 1,
+                        'mode': mode, 'turn': turn_index + 1, 'question': case['turns'][turn_index],
+                        'elapsed_seconds': elapsed, 'tool_calls': len(tools),
+                        'answer': answer, 'evaluation': evaluation,
+                    })
+                    save()
+                    print(f"{case['id']} / {mode} / turn {turn_index + 1}: {answer['status']}", flush=True)
         report['status'] = 'completed'
         save()
     print('Saved report: ' + str(args.output), flush=True)
@@ -182,10 +233,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--cases', help='Comma-separated case IDs; default all eight cases')
     parser.add_argument('--repeats', type=int, choices=range(1, 6), default=1)
-    parser.add_argument('--keyword-only', action='store_true', help='Disable embedding queries; initial indexing still uses configured embeddings')
-    parser.add_argument('--no-rerank', action='store_true')
-    parser.add_argument('--answer-review', action='store_true', help='Check evidence before publishing answers')
-    parser.add_argument('--web-search', action='store_true', help='Allow Agent to search and read public web pages')
     parser.add_argument('--output', type=Path, default=ROOT / '.cache' / 'evaluation.json')
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix='course-agent-eval-') as temporary:

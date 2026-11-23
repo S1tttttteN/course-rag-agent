@@ -1,5 +1,5 @@
 import { request } from './client';
-import type { CourseDocument, LibraryConfig, Preview, SearchResult } from '../types/document';
+import type { CourseDocument, LibraryConfig, Preview } from '../types/document';
 
 export const documentsApi = {
   config: () => request<LibraryConfig>('/library/config'),
@@ -20,5 +20,4 @@ export const documentsApi = {
     request<{ text: string }>(`/courses/${courseId}/documents/${id}/versions/${versionId}/text`, { signal }),
   richPreview: (courseId: string, id: string, versionId: string, signal: AbortSignal) =>
     request<{ html: string; css: string }>(`/courses/${courseId}/documents/${id}/versions/${versionId}/rich-preview`, { signal }),
-  search: (courseId: string, query: string, semantic: boolean, rerank: boolean) => request<SearchResult>(`/courses/${courseId}/search`, {method: 'POST', body: JSON.stringify({query, semantic, rerank})}),
 };

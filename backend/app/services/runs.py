@@ -49,14 +49,13 @@ def tool_update(run_id, record):
         return True
 
 
-def status(run_id, phase, trace=None, query=None):
+def status(run_id, phase, trace=None):
     """将排队中或运行中的问答标为运行中并记录阶段。
 
     Args:
         run_id: 问答运行 ID。
         phase: 客户端显示的阶段说明。
         trace: 要浅合并到执行摘要的可选字典。
-        query: 要保存的可选实际检索查询。
 
     Returns:
         成功保存时为 True，运行缺失或状态不允许更新时为 False。
@@ -70,8 +69,6 @@ def status(run_id, phase, trace=None, query=None):
             run.trace = json.dumps(
                 {**json.loads(run.trace), **trace}, ensure_ascii=False
             )
-        if query is not None:
-            run.query = query
         event(session, run_id, "status", {"status": run.status, "phase": phase})
         session.commit()
         return True
@@ -230,6 +227,12 @@ def append(run_id, text):
         return True
 
 
+def unregistered_citations(text, known):
+    """返回正文中没有登记的引用编号。"""
+    references = {int(number) for number in re.findall(r"(?<![\w])\[(\d{1,4})\]", text)}
+    return sorted(references - known)
+
+
 def finish(run_id, state, error="", *, agent_checkpoint_id=None):
     """提交运行和消息的终态与结束事件，重复结束已终止的运行时直接返回。
 
@@ -260,13 +263,7 @@ def finish(run_id, state, error="", *, agent_checkpoint_id=None):
         )
         message.status = state
         known = {source["number"] for source in citations_for_run(session, run_id)}
-        unknown = sorted(
-            {
-                int(number)
-                for number in re.findall(r"(?<![\w])\[(\d{1,4})\]", message.content)
-            }
-            - known
-        )
+        unknown = unregistered_citations(message.content, known)
         trace = json.loads(run.trace)
         trace["elapsed_seconds"] = round(
             (
@@ -274,8 +271,6 @@ def finish(run_id, state, error="", *, agent_checkpoint_id=None):
             ).total_seconds(),
             3,
         )
-        if trace.get("evidence_check", {}).get("status") == "checking":
-            trace["evidence_check"]["status"] = "interrupted"
         for tool in trace.get("tools", []):
             if tool["status"] == "running":
                 tool["status"] = "interrupted"

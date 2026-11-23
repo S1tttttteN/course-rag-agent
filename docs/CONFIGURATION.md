@@ -46,9 +46,7 @@ Ollama 对话通过 `OLLAMA_BASE_URL` 连接，默认本机通用地址为 `http
 
 ## 回答设置
 
-「允许 Agent 联网」和「生成后核对证据」在对话页面的「回答设置」中调整。两项默认关闭，选择保存在当前浏览器，从下一次提问生效。固定 RAG 始终只检索课程资料。
-
-升级后，后端忽略旧的 `ANSWER_REVIEW` 和 `WEB_SEARCH_ENABLED`。需要开启时请在页面重新选择。主动运行 `scripts/env_config.py --sync` 会备份 `.env` 并移除这两个废弃字段。
+对话输入区的「允许联网」默认关闭，选择保存在当前浏览器，从下一次提问生效。Agent 由后端统一执行混合检索。若配置了可用的重排服务，则自动重排。
 
 ## 其他字段
 
@@ -56,8 +54,8 @@ Ollama 对话通过 `OLLAMA_BASE_URL` 连接，默认本机通用地址为 `http
 | --- | --- |
 | `RUN_TIMEOUT` | 留空按对话服务计算：Ollama 600 秒，其余 180 秒 |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | 500 / 100；修改后已有资料需重新处理才应用新分块 |
-| `TOP_K` | 默认 4，页面可调整，Agent 上限 4 |
-| `COURSE_AGENT_DATA_DIR` | 留空使用项目 `data/`，可填写绝对目录；改变路径不会自动搬迁旧数据 |
+| `TOP_K` | 单次课程检索默认返回 4 条，有效范围 1–4 |
+| `COURSE_AGENT_DATA_DIR` | 留空使用项目 data/。从项目根目录启动时可填写相对目录，如 .local/data |
 
 API Key 仅填写所选服务商的字段，其余留空；Ollama 不需要 API Key。不要把 Key 写入前端、文档、Issue 或截图。
 

@@ -5,7 +5,6 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Response, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -19,7 +18,6 @@ from app.core.models import (
 )
 from app.db.models import CleanupJob
 from app.db.session import get_session
-from app.retrieval.search import search
 from app.services import documents
 
 router = APIRouter(tags=["documents"])
@@ -295,39 +293,3 @@ def preview_document(
         documents.DocumentError: 资料不存在或没有可预览的版本。
     """
     return documents.preview(session, str(course_id), str(document_id), offset, limit)
-
-
-class SearchInput(BaseModel):
-    """课程资料检索的请求体。
-
-    Attributes:
-        query: 去除首尾空白后须为 1 至 1000 个字符的查询。
-        top_k: 最多返回的片段数，取值为 1 至 20，默认为 4。
-        semantic: 是否启用向量检索，默认启用。
-        rerank: 是否启用重排序，默认关闭。
-    """
-
-    model_config = ConfigDict(extra="forbid")
-    query: Annotated[
-        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1000)
-    ]
-    top_k: int = Field(default=4, ge=1, le=20)
-    semantic: bool = True
-    rerank: bool = False
-
-
-@router.post("/courses/{course_id}/search")
-def search_documents(course_id: UUID, body: SearchInput):
-    """在指定课程的可用资料中检索片段。
-
-    Args:
-        course_id: 课程 ID。
-        body: 包含查询文本及检索选项的请求体。
-
-    Returns:
-        包含检索结果和检索过程摘要的字典。
-
-    Raises:
-        CourseNotFound: 指定课程不存在。
-    """
-    return search(str(course_id), body.query, body.top_k, body.semantic, body.rerank)

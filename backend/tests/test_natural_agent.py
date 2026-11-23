@@ -1,5 +1,4 @@
 """Natural/web mode on the real LangChain graph, without network or paid calls."""
-import asyncio
 from contextlib import closing
 import json
 import sqlite3
@@ -8,12 +7,12 @@ import unittest
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
-from langchain_core.messages import AIMessage, AIMessageChunk
-from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 from sqlalchemy import select
 
-from test_agent import ScriptedModel, call
+from agent_fakes import FailingModel, PausedModel, ScriptedModel, StreamingModel, call
 import test_conversations as shared
 from app.repositories.conversations import completed_turns
 from app.core.config import CHECKPOINT_PATH
@@ -26,74 +25,6 @@ from app.services import runs
 URL = 'https://example.org/course'
 SNIPPET = {'url': URL, 'title': '公开教学样例', 'text': '课程外实验采用三次观察。', 'kind': 'web_snippet'}
 PAGE = {**SNIPPET, 'text': '完整教学说明：连续观察三次后比较结果。', 'kind': 'web_page'}
-
-
-class StreamingModel(ScriptedModel):
-    """将预设响应转换为测试用流式模型输出。"""
-
-    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
-        """将预设响应作为工具调用或正文流发送。
-
-        Args:
-            messages: 传给模型的消息。
-            stop: 框架提供的可选停止词。
-            run_manager: 框架提供的可选异步回调管理器。
-            kwargs: 调用方附加的关键字参数。
-
-        Yields:
-            工具调用块或分段的正文块。
-        """
-        result = await self._agenerate(messages, stop, run_manager, **kwargs)
-        message = result.generations[0].message
-        if message.tool_calls:
-            yield ChatGenerationChunk(message=AIMessageChunk(content='', tool_call_chunks=[
-                {'name': item['name'], 'args': json.dumps(item['args']), 'id': item['id'], 'index': index}
-                for index, item in enumerate(message.tool_calls)]))
-        else:
-            for position in range(0, len(message.content), 5):
-                yield ChatGenerationChunk(message=AIMessageChunk(content=message.content[position:position + 5]))
-                await asyncio.sleep(.01)
-
-
-class PausedModel(StreamingModel):
-    """模拟发送首段正文后停顿的模型。"""
-
-    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
-        """发出一个正文片段后等待，用于测试运行取消。
-
-        Args:
-            messages: 流式接口收到的输入消息。
-            stop: 框架提供的可选停止词。
-            run_manager: 框架提供的可选异步回调管理器。
-            kwargs: 调用方附加的关键字参数。
-
-        Yields:
-            等待前发出的正文片段。
-        """
-        yield ChatGenerationChunk(message=AIMessageChunk(content='已生成的自然回答。'))
-        await asyncio.sleep(30)
-
-
-class FailingModel(StreamingModel):
-    """模拟发布部分正文后失败的模型。"""
-
-    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
-        """发出正文片段后触发模拟服务商错误。
-
-        Args:
-            messages: 流式接口收到的输入消息。
-            stop: 框架提供的可选停止词。
-            run_manager: 框架提供的可选异步回调管理器。
-            kwargs: 调用方附加的关键字参数。
-
-        Yields:
-            失败前发出的正文片段。
-
-        Raises:
-            RuntimeError: 用于验证服务商错误处理的模拟异常。
-        """
-        yield ChatGenerationChunk(message=AIMessageChunk(content='已生成的部分。'))
-        raise RuntimeError('private-provider-error-fixture')
 
 
 class SummaryModel(ScriptedModel):
@@ -112,9 +43,10 @@ class SummaryModel(ScriptedModel):
 
 
 class NaturalAgentTests(unittest.TestCase):
-    """验证关闭严格核对时的流式问答与可选网络来源。"""
+    """验证流式问答、会话记忆与可选网络来源。"""
 
     publish = shared.ConversationTests.publish
+    ask = shared.ConversationTests.ask
     wait = shared.ConversationTests.wait
     tearDown = shared.ConversationTests.tearDown
 
@@ -123,28 +55,10 @@ class NaturalAgentTests(unittest.TestCase):
         # Unexpected network/cloud activity is a hard test failure.
         self.web_search = self.enterContext(patch('app.qa.tools.web_search', side_effect=AssertionError('unexpected web search')))
         self.web_read = self.enterContext(patch('app.qa.tools.web_read', side_effect=AssertionError('unexpected web read')))
-        self.review = self.enterContext(patch('app.qa.agent.publish_checked', side_effect=AssertionError('unexpected strict reviewer')))
         shared.ConversationTests.setUp(self)
 
-    def ask(self, question='请解释一个概念', path=None, mode='agent', **settings):
-        """向指定测试对话提交所选模式的问答。
-
-        Args:
-            question: 用户提交的问题正文。
-            path: 可选对话路径，省略时使用当前测试对话。
-            mode: 问答模式，取值为 rag 或 agent。
-            settings: 随提问提交的可选回答设置。
-
-        Returns:
-            已接受的运行 ID。
-        """
-        response = self.client.post(f'{path or self.path}/runs', json={
-            'question': question, 'mode': mode, 'semantic': False, 'rerank': False, **settings})
-        self.assertEqual(response.status_code, 202, response.text)
-        return response.json()['id']
-
-    def test_empty_course_can_answer_without_retrieval_or_strict_review(self):
-        """验证关闭严格审查时空课程可以直接流式回答。"""
+    def test_empty_course_can_answer_general_questions(self):
+        """验证空课程下的通用问题可以直接流式回答。"""
         course = self.client.post(f'/api/courses/{self.other}/conversations', json={}).json()['id']
         self.path = f'/api/courses/{self.other}/conversations/{course}'
         model = StreamingModel(responses=[AIMessage(content='可以这样理解：用一个生活中的例子说明概念。')])
@@ -153,13 +67,11 @@ class NaturalAgentTests(unittest.TestCase):
         self.assertEqual(answer['status'], 'completed')
         self.assertEqual(answer['content'], model.responses[0].content)
         self.assertEqual(answer['citations'], [])
-        self.assertFalse(answer['run']['trace']['answer_review'])
-        self.assertFalse(answer['run']['trace']['web_search'])
-        self.review.assert_not_called()
+        self.assertFalse(answer['run']['web_search'])
         self.web_search.assert_not_called()
 
-    def test_summary_restores_after_restart_and_agent_rag_switch(self):
-        """验证首轮定义经过真实摘要、重启和模式切换后仍可使用。"""
+    def test_summary_restores_after_restart(self):
+        """验证首轮约定经过真实摘要后可在重启后续接。"""
         model = SummaryModel(responses=[AIMessage(content='已经记录。' + '复习内容。' * 120)])
         definition = '方案 A 指多级反馈队列'
         with patch('app.qa.agent.get_llm', return_value=model):
@@ -183,33 +95,17 @@ class NaturalAgentTests(unittest.TestCase):
         self.context.__exit__(None, None, None)
         self.context = TestClient(shared.app)
         self.client = self.context.__enter__()
-        rag = shared.FakeLLM('固定 RAG 的唯一回答。')
-        with patch('app.qa.manager.get_llm', return_value=rag):
-            self.assertEqual(self.wait(self.ask('接着解释方案 A', mode='rag'))['status'], 'completed')
-        self.assertIn(definition, rag.rewrites[-1][-1].content)
         resumed = SummaryModel(responses=[AIMessage(content='接着复习。')])
         with patch('app.qa.agent.get_llm', return_value=resumed):
             self.assertEqual(self.wait(self.ask('继续接着讲'))['status'], 'completed')
         context = '\n'.join(item.content for item in resumed.seen[-1])
         self.assertIn(definition, context)
-        self.assertEqual(context.count(rag.answer), 1)
         self.assertEqual(context.count('方案 A 是什么？'), 1)
         isolated_id = self.client.post(self.base, json={}).json()['id']
         self.path = f'{self.base}/{isolated_id}'
         with patch('app.qa.agent.get_llm', return_value=resumed):
             self.assertEqual(self.wait(self.ask('开始新对话'))['status'], 'completed')
         self.assertNotIn(definition, '\n'.join(item.content for item in resumed.seen[-1]))
-
-    def test_first_agent_turn_loads_existing_rag_history(self):
-        """验证首次使用 Agent 可以载入已有对话里超过三轮的已完成问答。"""
-        first_question = '记住起始约定 K7。'
-        with patch('app.qa.manager.get_llm', return_value=shared.FakeLLM('收到')):
-            for question in (first_question, '第二轮', '第三轮', '第四轮'):
-                self.assertEqual(self.wait(self.ask(question, mode='rag'))['status'], 'completed')
-        model = SummaryModel(responses=[AIMessage(content='接上前文。')])
-        with patch('app.qa.agent.get_llm', return_value=model):
-            self.assertEqual(self.wait(self.ask('起始约定是什么？'))['status'], 'completed')
-        self.assertEqual(sum(item.content == first_question for item in model.seen[-1]), 1)
 
     def test_summary_failure_keeps_previous_checkpoint(self):
         """验证摘要失败会终止本轮，下一轮仍从上次成功的检查点开始。"""
@@ -302,7 +198,7 @@ class NaturalAgentTests(unittest.TestCase):
         self.assertEqual([item['number'] for item in answer['citations']], [1, 2, 3])
         self.assertEqual([item['kind'] for item in answer['citations']], ['course', 'web_snippet', 'web_page'])
         self.assertEqual(len(answer['run']['trace']['tools']), 4)
-        self.assertTrue(answer['run']['trace']['web_search'])
+        self.assertTrue(answer['run']['web_search'])
         citation = answer['citations'][-1]
         self.assertTrue(citation['retrieved_at'])
         stream = self.client.get(f'{self.path}/runs/{run_id}/events').text
@@ -357,8 +253,8 @@ class NaturalAgentTests(unittest.TestCase):
             second = self.wait(self.ask())
         self.assertEqual(first['status'], 'completed')
         self.assertEqual(second['status'], 'completed')
-        self.assertTrue(first['run']['trace']['web_search'])
-        self.assertFalse(second['run']['trace']['web_search'])
+        self.assertTrue(first['run']['web_search'])
+        self.assertFalse(second['run']['web_search'])
         first_tools, second_tools = ({tool.name for tool in call.args[1]} for call in bind_tools.call_args_list)
         self.assertEqual(first_tools - second_tools, {'search_web', 'read_webpage'})
         self.assertEqual(second_tools, {'search_course', 'list_documents', 'read_document'})
@@ -388,24 +284,6 @@ class NaturalAgentTests(unittest.TestCase):
         self.assertEqual(answer['status'], 'failed')
         self.assertEqual(answer['content'], '已生成的部分。')
         self.assertNotIn('private-provider-error-fixture', json.dumps(answer))
-
-    def test_rag_also_streams_without_strict_review(self):
-        """验证固定 RAG 可逐轮切换证据核对，且忽略联网请求。"""
-        with patch('app.qa.manager.get_llm', return_value=shared.FakeLLM()):
-            reviewed = self.wait(self.ask('进程是什么？', mode='rag', answer_review=True))
-        self.assertEqual(reviewed['run']['trace']['evidence_check']['status'], 'checked')
-        with patch('app.qa.manager.get_llm', return_value=shared.FakeLLM(answer='课程说明。[1] 补充说明：可用例子帮助理解。')):
-            run_id = self.ask('能举例吗？', mode='rag', web_search=True)
-            answer = self.wait(run_id)
-        self.assertEqual(answer['status'], 'completed')
-        self.assertIn('补充说明', answer['content'])
-        self.assertFalse(answer['run']['trace']['answer_review'])
-        self.assertFalse(answer['run']['trace']['web_search'])
-        events = self.client.get(f'{self.path}/runs/{run_id}/events').text
-        self.assertGreater(events.count('event: delta'), 1)
-        self.assertNotIn('正在逐条核对回答依据', events)
-        self.web_search.assert_not_called()
-        self.web_read.assert_not_called()
 
     def test_budget_limits_web_calls_and_finalizes_without_more_tools(self):
         """验证网络工具受统一调用预算约束，并在预算耗尽后结束本轮。"""

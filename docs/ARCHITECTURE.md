@@ -9,16 +9,13 @@ flowchart TD
     UI[React 页面] -->|REST / SSE| API[FastAPI]
     API --> S[课程 / 资料 / 对话 / 运行服务]
     S --> A[LangChain Agent]
-    S --> R[固定 RAG]
     A --> T[绑定课程范围的工具]
     T --> K[资料检索与阅读]
     T --> W[公开搜索与网页摘录]
-    R --> K
     K --> V[Chroma / BM25 / RRF / 可选重排]
     S --> DB[SQLite]
     S --> F[本地上传文件]
     A --> M[配置的模型服务]
-    R --> M
 ```
 
 ## 职责
@@ -30,12 +27,13 @@ flowchart TD
 | `backend/app/api/` | 路由、输入验证与 HTTP 错误 |
 | `backend/app/services/` | 业务事务、状态变更与运行事件 |
 | `backend/app/repositories/` | 数据访问与历史查询 |
-| `backend/app/qa/` | Agent、RAG、证据核对、运行调度和用量记录 |
+| `backend/app/qa/` | Agent、工具中间件、上下文、运行调度和用量记录 |
 | `backend/app/retrieval/` | 解析、索引、混合召回、重排和网页工具 |
 | `backend/app/jobs/` | 自动建库、清理与恢复 |
 | `backend/app/db/` | SQLAlchemy 数据模型、连接 |
 | `backend/app/core/` | 配置、模型工厂与并发锁 |
-| `backend/migrations/` | Alembic 数据库迁移 |
+| `backend/migrations/` | Alembic 数据库基线和后续迁移 |
+| `backend/evaluation/` | 离线固定 RAG 基线和对照评测 |
 
 ## 数据与一致性
 
@@ -47,7 +45,7 @@ SQLite 保存课程、资料版本、原文片段、对话、运行事件和引�
 
 引用独立保存回答当时的内容，删除或替换原资料不会改写既有回答依据。只有已完成问答进入后续上下文；中止和失败内容保留展示。
 
-LangGraph 用独立 SQLite 文件保存 Agent 图状态。业务库只在回答完成时提交可继续使用的检查点 ID。下一轮以该检查点为起点，补入之后完成的问答，因而可以在固定 RAG 和 Agent 之间切换。当前轮的工具结果和证据核对前草稿留在运行检查点中，后续问答从已经发布的内容继续。
+LangGraph 用独立 SQLite 文件保存 Agent 图状态。业务库只在回答完成时提交可继续使用的检查点 ID。下一轮以该检查点为起点，补入之后完成的问答。可续接的检查点保存摘要与已发布问答。
 
 ## 运行控制
 

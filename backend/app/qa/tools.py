@@ -185,9 +185,6 @@ class CourseToolContext:
         manager: 执行阻塞检索和工具操作的运行管理器。
         run_id: 当前问答运行 ID。
         course_id: 工具访问范围内的课程 ID。
-        top_k: 单次资料检索的候选数上限，最多为 4。
-        semantic: 是否启用向量检索。
-        rerank: 是否启用重排序。
         lock: 串行执行工具调用的异步锁。
         calls: 已经消耗的工具调用次数。
         sources: 按片段 ID 索引的已登记引用。
@@ -198,13 +195,9 @@ class CourseToolContext:
     manager: Any
     run_id: str
     course_id: str
-    top_k: int
-    semantic: bool
-    rerank: bool
 
     def __post_init__(self):
-        """限制单次检索片段数，并初始化仅供本轮使用的工具状态。"""
-        self.top_k = min(self.top_k, 4)
+        """初始化仅供本轮使用的工具状态。"""
         self.lock = asyncio.Lock()
         self.calls = 0
         self.sources = {}
@@ -297,9 +290,7 @@ async def search_course(query: str, runtime: ToolRuntime[CourseToolContext]) -> 
         BudgetExceeded: 候选来源超过本轮引用预算。
     """
     context = runtime.context
-    result = await context.manager.retrieve(
-        context.course_id, query, context.top_k, context.semantic, context.rerank
-    )
+    result = await context.manager.retrieve(context.course_id, query)
     sources = context.register(result["results"])
     return json.dumps(
         {"sources": sources, "retrieval": result["trace"]}, ensure_ascii=False

@@ -6,7 +6,7 @@ import jieba
 from langchain_core.documents import Document as TextDocument
 from rank_bm25 import BM25Okapi
 
-from app.core.models import embedding_profile, get_embeddings
+from app.core.models import TOP_K, embedding_profile, get_embeddings
 from app.db.session import SessionLocal
 from app.repositories.documents import active_chunks
 from app.retrieval import index
@@ -63,6 +63,20 @@ def search(course_id: str, query: str, top_k=4, semantic=True, rerank=False):
     """
     ranked, trace = rank_candidates(course_id, query, semantic=semantic)
     return finish_search(course_id, query, ranked, trace, top_k, rerank)
+
+
+
+def search_course_material(course_id, query):
+    """按产品策略检索课程片段，供 Agent 和离线问答基线复用。
+
+    Args:
+        course_id: 当前课程 ID。
+        query: 检索问题。
+
+    Returns:
+        结果及实际召回和重排记录。
+    """
+    return search(course_id, query, top_k=TOP_K, rerank=is_available())
 
 
 def rank_candidates(course_id, query, *, semantic=True, keyword=True):

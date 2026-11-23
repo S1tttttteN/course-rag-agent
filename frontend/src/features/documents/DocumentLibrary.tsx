@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ChangeEvent, FormEvent } from 'react';
-import { CheckCircle2, ChevronLeft, ChevronRight, Clock3, FileText, FolderOpen, LoaderCircle, RefreshCw, Search, Trash2, Upload, XCircle } from 'lucide-react';
+import type { ChangeEvent } from 'react';
+import { CheckCircle2, ChevronLeft, ChevronRight, Clock3, FileText, FolderOpen, LoaderCircle, RefreshCw, Trash2, Upload, XCircle } from 'lucide-react';
 import { documentsApi } from '../../api/documents';
 import { Dialog } from '../../components/Dialog';
 import { ReadingPanel } from '../../components/ReadingPanel';
 import { DocumentReadingWindow, documentReaderFormat } from '../../components/DocumentReadingWindow';
-import type { CourseDocument, LibraryConfig, Preview, SearchResult } from '../../types/document';
+import type { CourseDocument, LibraryConfig, Preview } from '../../types/document';
 
 function sizeLabel(size: number) { return size < 1024 * 1024 ? `${Math.max(1, Math.round(size / 1024))} KB` : `${(size / 1024 / 1024).toFixed(1)} MB`; }
 
@@ -37,12 +37,6 @@ export function DocumentLibrary({ courseId }: { courseId: string }) {
   const [selection, setSelection] = useState<{ id: string; offset: number } | null>(null);
   const [preview, setPreview] = useState<{ key: string; data?: Preview; error?: string } | null>(null);
   const [previewAttempt, setPreviewAttempt] = useState(0);
-  const [query, setQuery] = useState('');
-  const [semantic, setSemantic] = useState(true);
-  const [rerank, setRerank] = useState(false);
-  const [searching, setSearching] = useState(false);
-  const [results, setResults] = useState<SearchResult | null>(null);
-  const [searchError, setSearchError] = useState('');
   const input = useRef<HTMLInputElement>(null);
   const replaceInput = useRef<HTMLInputElement>(null);
   const mounted = useRef(true);
@@ -58,8 +52,6 @@ export function DocumentLibrary({ courseId }: { courseId: string }) {
   const currentPreview = preview?.key === previewKey ? preview : null;
   const readyCount = documents.filter(document => document.usable).length;
   const hasPending = documents.some(document => ['queued', 'processing'].includes(document.latest.status));
-  const revision = documents.map(document => `${document.id}:${document.active_version_id}`).join(',');
-  const currentRevision = useRef(revision);
 
   useEffect(() => {
     mounted.current = true;
@@ -82,7 +74,6 @@ export function DocumentLibrary({ courseId }: { courseId: string }) {
     const timer = setInterval(() => { void reload(); }, hasPending ? 1500 : 7000);
     return () => clearInterval(timer);
   }, [reload, hasPending]);
-  useEffect(() => { currentRevision.current = revision; setResults(null); setSearchError(''); }, [revision]);
   useEffect(() => {
     if (selection && !selectedId) setSelection(null);
   }, [selectedId, selection]);
@@ -144,7 +135,6 @@ export function DocumentLibrary({ courseId }: { courseId: string }) {
       await documentsApi.delete(courseId, deleting.id);
       setDocuments(items => items.filter(item => item.id !== deleting.id));
       setDeleting(null);
-      setResults(null);
       await reload();
       setNotice('资料已从课程中移除，原文件与索引将在后台清理。');
     }
@@ -157,20 +147,6 @@ export function DocumentLibrary({ courseId }: { courseId: string }) {
     const trigger = previewTrigger.current;
     requestAnimationFrame(() => trigger?.focus({ preventScroll: true }));
   }, []);
-  async function find(event: FormEvent) {
-    event.preventDefault();
-    if (!query.trim() || searching) return;
-    setSearching(true); setSearchError(''); setResults(null);
-    const requestRevision = revision;
-    try {
-      const data = await documentsApi.search(courseId, query.trim(), semantic, rerank);
-      if (mounted.current && currentRevision.current === requestRevision) setResults(data);
-      else if (mounted.current) setSearchError('资料已更新，请重新检索以查看最新版本。');
-    }
-    catch (error) { if (mounted.current) setSearchError(error instanceof Error ? error.message : '搜索失败。'); }
-    finally { if (mounted.current) setSearching(false); }
-  }
-
   return <section className="document-library" aria-labelledby="library-title">
     <div className="library-workspace">
     <div className="library-content">
@@ -215,11 +191,6 @@ export function DocumentLibrary({ courseId }: { courseId: string }) {
       })}
     </div>}
 
-    <section className="retrieval-trial" aria-labelledby="search-title"><div className="trial-heading"><h2 id="search-title"><Search size={19} />检索试用</h2><span>查看原文召回，不生成回答</span></div><p>输入关键词或问题，核对这门课的资料能找到什么。</p>
-      <form onSubmit={find} className="search-form"><div className="query-row"><input aria-label="资料检索问题" placeholder="例如：进程和线程有什么区别？" maxLength={1000} value={query} onChange={event => setQuery(event.target.value)} disabled={searching} /><button className="button primary" type="submit" disabled={!readyCount || !query.trim() || searching}>{searching ? <LoaderCircle size={16} className="spin" /> : <Search size={16} />}{searching ? '正在检索…' : '检索原文'}</button></div><div className="search-options"><label><input type="checkbox" checked={semantic} onChange={event => setSemantic(event.target.checked)} />结合语义检索</label><label><input type="checkbox" checked={rerank} onChange={event => setRerank(event.target.checked)} />相关度重排</label><span>语义和重排均关闭时，检索仅在本地执行。</span></div></form>
-      {searchError && <p className="error" role="alert">{searchError}</p>}
-      {results && <div className="search-results" aria-live="polite"><p className="search-summary">找到 {results.results.length} 个片段{results.trace.semantic ? '，已结合语义与关键词检索' : '，使用关键词检索'}{results.trace.reranked && '，已重排'}。</p>{results.trace.note && <p className="subtle-note">{results.trace.note}</p>}{results.results.map((result, position) => <article key={result.id}><h3><span className="citation-number">[{position + 1}]</span>{result.source}<span className="result-location">版本 {result.version}{result.page !== null && ` / 第 ${result.page} 页`}</span></h3><p>{result.text}</p></article>)}{results.results.length === 0 && <p className="subtle-note">没有找到相关片段。试试资料中的关键词，或添加相关文件。</p>}</div>}
-    </section>
     </div>
     {selectedDocument && !opensOriginal ? <ReadingPanel title="提取文本" onClose={closePreview}>
       <h3 className="citation-source-title">{currentPreview?.data?.source ?? selectedDocument.name}</h3>

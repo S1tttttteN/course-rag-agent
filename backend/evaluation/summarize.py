@@ -21,13 +21,16 @@ def main():
         rows = [row for row in report['results'] if row['mode'] == mode]
         if not rows:
             continue
-        usages = [row['answer']['run']['trace'].get('usage', {}) for row in rows]
+        usages = [row['answer'].get('run', {}).get('trace', {}).get('usage', {}) for row in rows]
         known = [usage for usage in usages if usage.get('calls_with_usage')]
         tokens = f"{sum(usage['input_tokens'] for usage in known)} / {sum(usage['output_tokens'] for usage in known)}" if known else '未返回'
         if not all(usage.get('complete') for usage in usages):
             tokens += '（不完整）'
-        lines.append(f"| {mode} | {sum(row['answer']['status'] == 'completed' for row in rows)}/{len(rows)} | {mean(row['elapsed_seconds'] for row in rows):.2f}s | {median(row['elapsed_seconds'] for row in rows):.2f}s | {mean(row['tool_calls'] for row in rows):.2f} | {sum(usage.get('model_calls', 0) for usage in usages)} | {tokens} |")
-    lines += ['', '工具次数只统计显式 Agent 工具，RAG 的固定检索不计为工具调用。耗时包含本地轮询延迟；token为服务商返回值，未折算费用。', '']
+        times = [row['elapsed_seconds'] for row in rows if row['elapsed_seconds'] is not None]
+        elapsed = f"{mean(times):.2f}s | {median(times):.2f}s" if times else '— | —'
+        lines.append(f"| {mode} | {sum(row['answer']['status'] == 'completed' for row in rows)}/{len(rows)} | {elapsed} | {mean(row['tool_calls'] for row in rows):.2f} | {sum(usage.get('model_calls', 0) for usage in usages)} | {tokens} |")
+    timing = '固定 RAG 记录进程内耗时，Agent 耗时包含问答 API 的排队及轮询。' if report.get('protocol', {}).get('timing') else '耗时包含本地轮询。'
+    lines += ['', f'工具次数只统计 Agent 工具。{timing} Token 为服务商返回值。', '']
     if report.get('parameters', {}).get('evidence_review'):
         lines += ['## 证据核对', '', '| 模式 | 完成核对轮数 | 核对未完成 | 候选条目 / 保留条目 | 拒绝条目 | 平均核对耗时 |', '|---|---:|---:|---:|---:|---:|']
         for mode in ('rag', 'agent'):
@@ -43,7 +46,8 @@ def main():
         flags = row['evaluation']['automatic']
         failed = [key for key, value in flags.items() if value is False]
         coverage = row['evaluation']['coverage_fraction']
-        lines.append(f"| {row['case_id']} / {row['turn']} | {row['mode']} | {row['answer']['status']} | {', '.join(failed) if failed else '通过'} | {f'{coverage:.0%}' if coverage is not None else '不适用'} | {row['tool_calls']} | {row['elapsed_seconds']:.2f}s |")
+        elapsed = f"{row['elapsed_seconds']:.2f}s" if row['elapsed_seconds'] is not None else '—'
+        lines.append(f"| {row['case_id']} / {row['turn']} | {row['mode']} | {row['answer']['status']} | {', '.join(failed) if failed else '通过'} | {f'{coverage:.0%}' if coverage is not None else '不适用'} | {row['tool_calls']} | {elapsed} |")
     lines += ['', '## 阅读结果时的边界', '',
               '- 自动结构检查仅覆盖完成状态、引用编号、课程归属、指定禁出词及预期缺口提示。',
               '- 词组覆盖只说明答案出现了预设词，不证明事实正确、引用充分或完成用户要求的全部步骤。',

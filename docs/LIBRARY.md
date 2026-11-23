@@ -18,9 +18,7 @@ DOCX 由浏览器读取对应版本的 Word 原件并连续显示，支持 Word 
 
 桌面可拖动阅读浮窗的标题栏、拉伸边角或最大化后还原，窄屏使用底部面板。优先打开当前可用版本。首次上传的原件保存后即可尝试阅读，索引进度独立显示。
 
-「检索试用」展示召回的文本片段。默认结合语义与 BM25，使用 RRF 融合。可以关闭语义或打开可选重排，失败时会提示降级。
-
-语义搜索需要当前嵌入配置与可用版本一致；切换嵌入模型后，需要逐份用原文件替换以生成新向量。配置切换期间可用关键词搜索，避免维度或语义空间混用。全部关闭语义与重排后，搜索仅在本地执行。
+Agent 的语义检索要求当前嵌入配置与可用版本一致。切换嵌入模型后，逐份替换资料以生成新向量。配置切换期间 Agent 可继续使用关键词检索。
 
 ## 状态与一致性
 
@@ -61,7 +59,6 @@ data/
 | GET | /courses/{course}/documents/{document}/versions/{version}/text | 读取指定版本的 TXT 或 Markdown，返回包含解码后全文的 `text` 字段 |
 | GET | /courses/{course}/documents/{document}/versions/{version}/rich-preview | 返回指定 HTML、HTM 或 DOCX 版本清理后的 `html` 和隔离预览使用的 `css` |
 | GET | /courses/{course}/documents/{document}/versions/{version}/docx | 为站内 Word 阅读器读取指定版本的 DOCX 原件 |
-| POST | /courses/{course}/search | query、top_k、semantic、rerank；返回原文和检索状态 |
 
 404 表示不存在或不属于当前课程；409 表示重名、状态冲突或尚无可用版本；413 表示上传文件过大；415 表示预览接口不支持该文件格式；422 表示请求字段、文本编码或正文长度不符合要求，或资料无法转换。
 

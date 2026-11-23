@@ -19,6 +19,7 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from sqlalchemy import select
 
 from test_courses import app
+from app.retrieval.search import search, search_course_material
 from app.core.config import UPLOAD_DIR
 from app.db.models import CleanupJob, DocumentVersion
 from app.db.session import SessionLocal
@@ -122,13 +123,35 @@ class DocumentTests(unittest.TestCase):
         self.assertIn('进程', preview['chunks'][0]['text'])
         self.assertEqual(preview['source'], '课程笔记.md')
         with patch('app.retrieval.search.get_embeddings', return_value=FakeEmbeddings()), patch('app.retrieval.search.embedding_profile', return_value='test:3'):
-            results = self.client.post(f'/api/courses/{self.course}/search', json={'query': '进程'}).json()
+            results = search_course_material(self.course, '进程')
         self.assertTrue(results['trace']['semantic'])
+        self.assertEqual(self.client.post(f'/api/courses/{self.course}/search', json={'query': '进程'}).status_code, 404)
         self.assertTrue(results['trace']['keyword'])
         self.assertEqual(results['results'][0]['document_id'], document['id'])
         self.assertEqual(self.client.get(f"/api/courses/{self.other}/documents/{document['id']}/preview").status_code, 404)
         self.assertEqual(self.client.delete(f"/api/courses/{self.other}/documents/{document['id']}").status_code, 404)
-        self.assertEqual(self.client.post(f'/api/courses/{self.other}/search', json={'query': '进程', 'semantic': False}).json()['results'], [])
+        self.assertEqual(search(self.other, '进程', semantic=False)['results'], [])
+
+    def test_product_retrieval_falls_back_and_uses_configured_reranker(self):
+        """向量故障时继续用关键词，重排服务可用时自动执行。"""
+        document = self.process(self.upload())
+        with (
+            patch('app.retrieval.search.embedding_profile', return_value='test:3'),
+            patch('app.retrieval.search.get_embeddings', side_effect=RuntimeError('offline')),
+            patch('app.retrieval.search.is_available', return_value=True),
+            patch('app.retrieval.search.rerank_documents', side_effect=lambda query, docs, limit: (docs, '')) as rerank,
+        ):
+            result = search_course_material(self.course, '进程')
+            self.assertTrue(result['trace']['keyword'])
+            self.assertFalse(result['trace']['semantic'])
+            self.assertTrue(result['trace']['reranked'])
+            self.assertEqual(result['results'][0]['document_id'], document['id'])
+            rerank.return_value = ([], 'unavailable')
+            rerank.side_effect = None
+            fallback = search_course_material(self.course, '进程')
+        self.assertFalse(fallback['trace']['reranked'])
+        self.assertIn('重排暂不可用', fallback['trace']['note'])
+        self.assertEqual(fallback['results'], result['results'])
 
     def test_failed_replacement_keeps_old_version_then_retry_publishes(self):
         """验证替换失败时保留原版本，重试成功后才发布新版本。"""
@@ -140,14 +163,14 @@ class DocumentTests(unittest.TestCase):
         self.assertEqual(failed['latest']['status'], 'failed')
         self.assertEqual(failed['active_version_id'], original['active_version_id'])
         self.assertTrue(failed['usable'])
-        found = self.client.post(f'/api/courses/{self.course}/search', json={'query': '进程', 'semantic': False}).json()['results']
+        found = search(self.course, '进程', semantic=False)['results']
         self.assertTrue(found)
         retried = self.client.post(f"{self.prefix}/{original['id']}/retry")
         self.assertEqual(retried.status_code, 202)
         published = self.process(retried.json())
         self.assertEqual(published['active_version_number'], 2)
         self.assertEqual(published['id'], original['id'])
-        self.assertEqual(self.client.post(f'/api/courses/{self.course}/search', json={'query': '进程', 'semantic': False}).json()['results'], [])
+        self.assertEqual(search(self.course, '进程', semantic=False)['results'], [])
         self.assertEqual(index.collection(self.course, 'test:3').count(), published['chunk_count'])
 
     def test_pdf_original_enforces_ownership_and_survives_cross_format_replacement(self):
@@ -378,7 +401,7 @@ class DocumentTests(unittest.TestCase):
         """验证删除立即隐藏资料，后台清理随后移除存储文件。"""
         document = self.process(self.upload())
         self.assertEqual(self.client.delete(f"{self.prefix}/{document['id']}").status_code, 204)
-        self.assertEqual(self.client.post(f'/api/courses/{self.course}/search', json={'query': '进程', 'semantic': False}).json()['results'], [])
+        self.assertEqual(search(self.course, '进程', semantic=False)['results'], [])
         with SessionLocal() as session:
             job = session.scalar(select(CleanupJob.id).where(CleanupJob.document_id == document['id']))
         cleanup_job(job)

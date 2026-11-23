@@ -15,13 +15,13 @@ backend/.venv/Scripts/python.exe backend/evaluation/run.py --output .cache/evalu
 backend/.venv/Scripts/python.exe backend/evaluation/summarize.py .cache/evaluation.json --output .cache/evaluation.md
 ```
 
-先安装 `backend/requirements-dev.txt`。脚本使用独立临时课程库，会调用所选对话、嵌入及可选重排服务，可能产生费用。默认关闭证据核对和 Agent 联网。用 `--answer-review` 为两种模式开启证据核对，用 `--web-search` 允许 Agent 联网。
+先安装 `backend/requirements-dev.txt`。脚本使用独立临时课程库，会调用所选对话、嵌入及可选重排服务，可能产生费用。两组共用产品的检索策略和模型配置，各自维护多轮上下文。Agent 走正常问答 API，固定 RAG 在离线脚本中执行，联网关闭。
 
 报告记录模型、参数、运行结果、来源、用量及耗时。词组覆盖和编号检查不能当作事实正确率，需要人工核对来源支持、完整性及解释质量。报告可能包含模型输出与环境信息，默认不提交，分享前自行审核。
 
 ## 真实课程对照
 
-冻结课件只读取指定课程的当前已发布原件，默认把快照、题库和结果放在忽略的 `.cache/os-benchmark/`。快照记录原件哈希、版本、当前分块和嵌入配置。该目录的操作系统题库包含 30 道检索题和 24 个问答场景，可用下列命令在本机校验和复跑。
+冻结课件只读取指定课程的当前已发布原件，默认把快照、题库和结果放在忽略的 `.cache/os-benchmark/`。快照记录原件哈希、版本、当前分块和嵌入配置。该目录的操作系统题库包含 30 道检索题和 24 个问答场景，复跑需要对应课程和单独准备的标注题库。使用下列命令校验和运行。
 
 ```powershell
 backend/.venv/Scripts/python.exe backend/evaluation/real_course.py freeze
@@ -32,7 +32,7 @@ backend/.venv/Scripts/python.exe backend/evaluation/real_course.py run
 
 已有快照时从 `validate` 开始。换课程时指定 `--course`、`--snapshot` 和 `--cases`。题库 JSON 包含 `retrieval` 和 `qa`。检索题用 `R01` 这样的题号、题型、问题、参考要点和证据组。每个证据组列出可互换的 `document`、`section` 和 `anchor`，分页资料可附 `page`。问答题用 `Q01` 这样的题号，可通过 `from_retrieval` 复用检索题，也可直接标注 `turns`。资料不足题单独标记 `gap`。
 
-正式运行分别度量 BM25、纯向量、融合和融合加重排，并对照固定 RAG、Agent 和固定 RAG 加重排。问答默认串行、重复 3 次。`--workers` 可并发不同场景，比较耗时时须记录并发数。真实课程评测关闭 LangSmith 自动追踪。嵌入、重排和回答仍使用项目已配置的模型服务，远程服务会接收相应输入。
+正式运行分别度量 BM25、纯向量、融合和融合加重排，并对照固定 RAG 与 Agent 的问答表现。固定 RAG 记录进程内耗时，Agent 耗时包含 API 排队和轮询。问答默认串行、重复 3 次。`--workers` 可并发不同场景，比较耗时时须记录并发数。真实课程评测关闭 LangSmith 自动追踪。嵌入、重排和回答仍使用项目已配置的模型服务，远程服务会接收相应输入。
 
 ```powershell
 backend/.venv/Scripts/python.exe backend/evaluation/course_report.py review

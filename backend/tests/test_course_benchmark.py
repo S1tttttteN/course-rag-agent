@@ -1,15 +1,23 @@
 """覆盖课程评测的证据计分、会话隔离和匿名导出。"""
 
 from copy import deepcopy
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import json
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import test_courses  # 初始化测试专用数据目录。
+from agent_fakes import StreamingModel, call
+from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage
+
 from app.retrieval.search import rank_candidates
 from evaluation.course_dataset import resolve_evidence
-from evaluation.course_report import export_experiments
+from evaluation.course_report import export_experiments, prepare_review, read_scores, render_report
 from evaluation.real_course import retrieval_scores, run_qa_case, run_retrieval_case
+from evaluation.run import publish_document
+from test_documents import FakeEmbeddings
 
 
 class CourseBenchmarkTests(unittest.TestCase):
@@ -73,19 +81,81 @@ class CourseBenchmarkTests(unittest.TestCase):
         self.assertTrue(rows[-1]["degraded"])
 
     def test_qa_reuses_only_the_same_scenario_conversation(self):
-        """每种配置新建会话，追问留在同一个会话内。"""
+        """Agent 复用场景会话，固定 RAG 使用独立的内存历史。"""
         client = Mock()
-        client.post.side_effect = [
-            Mock(**{"json.return_value": {"id": f"session{index}"}}) for index in range(3)
-        ]
+        client.post.return_value.json.return_value = {"id": "agent-session"}
         turn = {"question": "为什么？", "reference": "参考", "evidence": []}
         case = {"id": "Q01", "category": "followup", "turns": [turn, turn]}
         answer = {"status": "completed", "run": {"trace": {}}}
-        with patch("evaluation.run.run_turn", return_value=(answer, 1)) as run:
-            run_qa_case(client, "course", case, 1, 0, 2)
-        paths = [call.args[1] for call in run.call_args_list]
-        self.assertEqual(paths[::2], paths[1::2])
-        self.assertEqual(len(set(paths)), 3)
+
+        async def fixed(course, question, history, timeout):
+            """记录基线每轮可见的历史长度。"""
+            history.append(question)
+            return answer, len(history)
+
+        with (
+            patch("evaluation.fixed_rag.run_fixed_turn", new=AsyncMock(side_effect=fixed)),
+            patch("evaluation.run.run_turn", return_value=(answer, 1)) as run,
+        ):
+            rows = run_qa_case(client, "course", case, 1, 0, 2)
+        self.assertEqual([row["configuration"] for row in rows], ["rag", "rag", "agent", "agent"])
+        self.assertEqual([row["elapsed_seconds"] for row in rows], [1, 2, 1, 1])
+        self.assertEqual([request.args[1] for request in run.call_args_list],
+                         ["/api/courses/course/conversations/agent-session"] * 2)
+        self.assertEqual(run.call_args.args[2], {"question": "为什么？"})
+        self.assertEqual(client.post.call_count, 1)
+
+    def test_public_fixture_agent_and_fixed_rag_complete_followup(self):
+        """用公开资料跑通两组问答，并生成可重新读取的盲评包。"""
+        fixture = Path(__file__).resolve().parents[1] / 'evaluation' / 'fixtures' / '进程笔记.md'
+        turn = {'question': 'PCB 包含什么？', 'reference': '进程标识符', 'evidence': []}
+        followup = {**turn, 'question': '它还包含哪些信息？'}
+        case = {'id': 'Q01', 'category': 'followup', 'turns': [turn, followup]}
+        fixed = StreamingModel(responses=[
+            AIMessage(content='PCB 保存进程标识符。[1]'),
+            AIMessage(content='PCB 包含哪些字段？'),
+            AIMessage(content='还保存程序计数器。[1]'),
+        ])
+        agent = StreamingModel(responses=[
+            call('search_course', {'query': 'PCB'}),
+            AIMessage(content='PCB 保存进程标识符。[1]'),
+            call('search_course', {'query': '程序计数器'}),
+            AIMessage(content='还保存程序计数器。[1]'),
+        ])
+
+        with (
+            TestClient(test_courses.app) as client,
+            patch('app.jobs.indexing.get_embeddings', return_value=FakeEmbeddings()),
+            patch('app.jobs.indexing.embedding_profile', return_value='test:3'),
+            patch('app.retrieval.search.get_embeddings', return_value=FakeEmbeddings()),
+            patch('app.retrieval.search.embedding_profile', return_value='test:3'),
+            patch('evaluation.fixed_rag.get_llm', return_value=fixed),
+            patch('app.qa.agent.get_llm', return_value=agent),
+        ):
+            course = client.post('/api/courses', json={'name': '公开评测资料'}).json()['id']
+            try:
+                publish_document(client, course, fixture.name, fixture.read_bytes())
+                rows = run_qa_case(client, course, case, 1, 0, 10)
+            finally:
+                client.delete(f'/api/courses/{course}')
+
+        self.assertEqual([row['answer']['status'] for row in rows], ['completed'] * 4)
+        self.assertTrue(all(row['answer']['citations'][0]['source'] == fixture.name for row in rows))
+        self.assertIn(turn['question'], fixed.seen[1][-1].content)
+        self.assertIn(turn['question'], [message.content for message in agent.seen[2]])
+        report = {
+            'run_id': 'fixture', 'status': 'completed', 'application_version': 'test',
+            'cases_sha256': 'fixture', 'manifest': {'documents': [], 'chunk_size': 500, 'chunk_overlap': 100},
+            'indexed_chunks': {}, 'models': {'chat_model': 'scripted', 'embedding_model': 'test:3', 'reranker': {}},
+            'parameters': {'repeats': 1, 'workers': 1, 'timing': {'rag': 'in_process', 'agent': 'http_polling'}},
+            'retrieval': [], 'qa': rows,
+        }
+        with TemporaryDirectory() as temporary:
+            prepare_review(report, Path(temporary))
+            self.assertEqual(len(read_scores(Path(temporary), 'fixture')), 4)
+        self.assertIn('固定 RAG 记录进程内耗时', render_report(report, {}))
+        previous = {**report, 'qa': [*rows, {**rows[0], 'configuration': 'rag_rerank'}]}
+        self.assertIn('| all | rag_rerank |', render_report(previous, {}))
 
     def test_anonymous_export_does_not_copy_private_fields(self):
         """两组样本可配对，原始问题、来源和回答不会出现在导出。"""

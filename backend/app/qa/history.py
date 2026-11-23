@@ -137,8 +137,8 @@ async def load_history(saver, conversation_id, run_id):
     return config, saved, [message for pair in reversed(additions) for message in pair]
 
 
-def rag_history(messages):
-    """在固定 RAG 的预算内保留摘要和最近的完整问答。"""
+def recent_history(messages):
+    """在上下文预算内保留摘要和最近的完整问答。"""
     summary = [message for message in messages if is_summary(message)]
     tokens = estimate_tokens(summary)
     pairs = []
@@ -188,7 +188,7 @@ async def save_published_turn(agent, conversation_id, current, run_id, previous)
         {
             "messages": [
                 RemoveMessage(id=REMOVE_ALL_MESSAGES),
-                *rag_history(retained),
+                *recent_history(retained),
                 current,
                 answer_message(run_id, answer),
             ]

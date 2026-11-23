@@ -15,7 +15,7 @@ if __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from evaluation.course_dataset import QA_CATEGORIES, RETRIEVAL_CATEGORIES, read_json, write_json
-from evaluation.real_course import QA_CONFIGS, ROOT, WORK
+from evaluation.real_course import ROOT, WORK
 
 
 RETRIEVAL_CONFIGS = ("bm25", "vector", "hybrid", "hybrid_rerank")
@@ -132,7 +132,7 @@ def render_report(report, scores):
         "| 题型 | 配置 | 完成 / 总数 | 超时 | 检索降级 / 有记录 | 完整性 /2 | 引用支撑 /2 | 缺口通过率 | 耗时中位数（秒） | 平均模型调用 | 平均输入 / 输出 Token |",
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ])
-    qa_configs = tuple(config for config, _, _ in QA_CONFIGS)
+    qa_configs = tuple(dict.fromkeys(row["configuration"] for row in report["qa"]))
     for category, group in grouped(report["qa"], QA_CATEGORIES, qa_configs):
         for config, rows in group.items():
             completed = [row for row in rows if row["answer"]["status"] == "completed"]
@@ -155,8 +155,12 @@ def render_report(report, scores):
                 f"{metric(value.get('model_calls') for value in tokens)} | "
                 f"{metric(value.get('input_tokens') for value in tokens)} / {metric(value.get('output_tokens') for value in tokens)} |"
             )
+    if report["parameters"].get("timing"):
+        lines.extend(["", "固定 RAG 记录进程内耗时，Agent 耗时包含问答 API 的排队及轮询。"])
     lines.extend(["", "未填写的盲评分数保持为空。补齐同题同轮评分后可做配对质量对照。", ""])
     for left, right in (("rag", "agent"), ("rag", "rag_rerank")):
+        if left not in qa_configs or right not in qa_configs:
+            continue
         left_scores = {key[1:]: value for key, value in scores.items() if key[0] == left}
         right_scores = {key[1:]: value for key, value in scores.items() if key[0] == right}
         comparable = {
@@ -227,7 +231,7 @@ def export_experiments(report, scores):
     }
     for kind, categories, configs in (
         ("retrieval", RETRIEVAL_CATEGORIES, RETRIEVAL_CONFIGS),
-        ("qa", QA_CATEGORIES, tuple(config for config, _, _ in QA_CONFIGS)),
+        ("qa", QA_CATEGORIES, tuple(dict.fromkeys(row["configuration"] for row in report["qa"]))),
     ):
         dataset = uuid5(NAMESPACE_URL, f"course-evaluation:{kind}:{protocol}")
         for config in configs:

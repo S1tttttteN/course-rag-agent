@@ -39,8 +39,3 @@ export interface Preview {
   offset: number;
   chunks: {id: string; text: string; page: number | null; ordinal: number}[];
 }
-
-export interface SearchResult {
-  results: { id: string; document_id: string; version_id: string; version: number; source: string; text: string; page: number | null; rerank_score?: number }[];
-  trace: {semantic: boolean; keyword: boolean; reranked: boolean; candidates: number; note: string};
-}

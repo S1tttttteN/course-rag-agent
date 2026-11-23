@@ -129,7 +129,7 @@ OLLAMA_EMBEDDING_BASE_URL = (
 # ===== 检索与分块参数 =====
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
-TOP_K = int(os.getenv("TOP_K", "4"))  # 最终交给模型的片段数
+TOP_K = min(4, max(1, int(os.getenv("TOP_K", "4"))))  # 每次课程检索返回的片段数
 RUN_TIMEOUT = int(
     os.getenv("RUN_TIMEOUT", "").strip()
     or ("600" if CHAT_PROVIDER == "ollama" else "180")

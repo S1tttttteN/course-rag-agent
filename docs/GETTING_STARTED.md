@@ -45,7 +45,7 @@ backend/.venv/bin/python scripts/env_config.py --sync
 
 ## 存储与运行
 
-首次启动自动执行 Alembic 迁移。默认数据在 `data/`，更换 `COURSE_AGENT_DATA_DIR` 不会自动搬迁已有数据。关闭服务后可备份整个数据目录；配置文件另行私密保存。
+首次启动在空目录中初始化 SQLite 基线，默认使用 data/。如果电脑上已有旧版数据，请先关闭服务，再在 .env 中设 COURSE_AGENT_DATA_DIR=.local/data，从项目根目录启动。旧数据和旧检查点继续留在原目录。需要的课程资料可在新版重新上传。
 
 只运行一个后端进程，不增加 Uvicorn worker。资料处理串行；Ollama 同时回答一轮，其他对话服务最多两轮。活动任务上限六个，每段对话最多一个。
 

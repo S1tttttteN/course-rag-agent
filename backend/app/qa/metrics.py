@@ -8,7 +8,7 @@ class RunUsage(AsyncCallbackHandler):
     """累计一轮问答中模型报告的 Token 用量。
 
     Attributes:
-        run_id: 当前问答运行 ID。
+        run_id: 当前问答运行 ID，离线评测时为空。
         calls: 已开始的模型调用次数。
         summary_calls: 已开始的摘要模型调用次数。
         reported: 已返回用量信息的调用次数。
@@ -16,11 +16,11 @@ class RunUsage(AsyncCallbackHandler):
         output_tokens: 已报告的输出 Token 总数。
     """
 
-    def __init__(self, run_id):
+    def __init__(self, run_id=None):
         """绑定运行并将模型调用及用量计数归零。
 
         Args:
-            run_id: 问答运行 ID。
+            run_id: 问答运行 ID，省略时只收集用量。
         """
         self.run_id = run_id
         self.calls = 0
@@ -29,21 +29,21 @@ class RunUsage(AsyncCallbackHandler):
         self.input_tokens = 0
         self.output_tokens = 0
 
+    def summary(self):
+        """返回累计用量及报告完整性，未知 Token 数使用空值。"""
+        return {
+            "model_calls": self.calls,
+            "summary_calls": self.summary_calls,
+            "calls_with_usage": self.reported,
+            "input_tokens": self.input_tokens if self.reported else None,
+            "output_tokens": self.output_tokens if self.reported else None,
+            "complete": self.reported == self.calls,
+        }
+
     def publish(self):
-        """保存累计用量和报告完整性，未知 Token 数保留为空值。"""
-        runs.patch_trace(
-            self.run_id,
-            {
-                "usage": {
-                    "model_calls": self.calls,
-                    "summary_calls": self.summary_calls,
-                    "calls_with_usage": self.reported,
-                    "input_tokens": self.input_tokens if self.reported else None,
-                    "output_tokens": self.output_tokens if self.reported else None,
-                    "complete": self.reported == self.calls,
-                }
-            },
-        )
+        """将可关联运行的模型用量保存到执行记录。"""
+        if self.run_id is not None:
+            runs.patch_trace(self.run_id, {"usage": self.summary()})
 
     async def on_chat_model_start(self, serialized, messages, **kwargs):
         """累计一次已开始的对话模型调用。
