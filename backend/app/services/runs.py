@@ -9,17 +9,23 @@ from sqlalchemy import select
 
 from app.core.locks import catalog_lock
 from app.db.models import (
-    Chunk,
     Citation,
     Conversation,
-    Document,
-    DocumentVersion,
     Message,
     Run,
     utc_now,
 )
 from app.db.session import SessionLocal
+from app.repositories.documents import active_chunks
 from app.services.conversations import ACTIVE, citations_for_run, event
+
+
+MAX_EVIDENCE_CHARS = 20_000
+MAX_SOURCES = 24
+
+
+class BudgetExceeded(Exception):
+    """工具次数或引用容量已经达到本轮上限。"""
 
 
 def tool_update(run_id, record):
@@ -90,115 +96,74 @@ def patch_trace(run_id, values):
             session.commit()
 
 
-def snapshot(run_id, records):
-    """复核候选片段仍属于当前课程的可用版本，保存引用快照并返回本轮引用。
+def snapshot(run_id, records, *, web=False):
+    """去重、核算预算并保存本轮来源。
 
     Args:
         run_id: 问答运行 ID。
-        records: 待复核的课程片段候选记录。
+        records: 本次工具取得的课程片段或网络来源列表。
+        web: 本批是否为网络来源。
 
     Returns:
-        本轮保存的引用列表，运行不可写入时为空。
+        本轮全部快照及本批匹配的快照，均按引用编号排序。
+
+    Raises:
+        BudgetExceeded: 新增来源会超出本轮预算，整批保持原状。
     """
     with catalog_lock, SessionLocal() as session:
         run = session.get(Run, run_id)
         if run is None or run.status not in {"queued", "running"}:
-            return []
-        conversation = session.get(Conversation, run.conversation_id)
-        seen = {
-            citation.chunk_id
-            for citation in session.scalars(
-                select(Citation).where(Citation.run_id == run_id)
-            )
-        }
-        for row in records:
-            chunk = session.get(Chunk, row["id"])
-            document = session.get(Document, row["document_id"])
-            if (
-                chunk is None
-                or document is None
-                or document.course_id != conversation.course_id
-            ):
-                continue
-            if document.active_version_id != chunk.version_id or chunk.id in seen:
-                continue
-            version = session.get(DocumentVersion, chunk.version_id)
-            if (
-                version is None
-                or version.document_id != document.id
-                or version.status != "ready"
-            ):
-                continue
-            seen.add(chunk.id)
-            session.add(
-                Citation(
-                    run_id=run_id,
-                    number=len(seen),
-                    document_id=document.id,
-                    version_id=version.id,
-                    chunk_id=chunk.id,
-                    source=version.filename,
-                    version=version.number,
-                    text=chunk.text,
-                    page=chunk.page,
-                    start_index=chunk.start_index,
-                )
-            )
-        session.flush()
-        sources = citations_for_run(session, run_id)
-        event(session, run_id, "citations", {"citations": sources})
-        session.commit()
-        return sources
-
-
-def snapshot_web(run_id, records):
-    """把搜索或抓取工具实际返回的内容保存为本轮引用快照。
-
-    Args:
-        run_id: 问答运行 ID。
-        records: 包含地址、类型、标题和文本的网络来源记录。
-
-    Returns:
-        本轮保存的引用列表，运行不可写入时为空。
-    """
-    with catalog_lock, SessionLocal() as session:
-        run = session.get(Run, run_id)
-        if run is None or run.status not in {"queued", "running"}:
-            return []
-        existing = list(
-            session.scalars(select(Citation).where(Citation.run_id == run_id))
-        )
+            return [], []
+        existing = list(session.scalars(select(Citation).where(Citation.run_id == run_id)))
         seen = {item.chunk_id for item in existing}
+        new = []
+        wanted = set()
+        if not web:
+            conversation = session.get(Conversation, run.conversation_id)
+            candidates = {row["id"] for row in records} - seen
+            course_chunks = {
+                chunk.id: (chunk, document, version)
+                for chunk, document, version in active_chunks(
+                    session, conversation.course_id, chunk_ids=candidates,
+                )
+            }
         for row in records:
             key = (
-                "web:"
-                + hashlib.sha256((row["url"] + row["kind"]).encode()).hexdigest()[:48]
+                "web:" + hashlib.sha256((row["url"] + row["kind"]).encode()).hexdigest()[:48]
+                if web else row["id"]
             )
+            wanted.add(key)
             if key in seen:
                 continue
-            seen.add(key)
-            session.add(
-                Citation(
-                    run_id=run_id,
-                    number=len(seen),
-                    kind=row["kind"],
-                    url=row["url"],
-                    retrieved_at=utc_now(),
-                    document_id="",
-                    version_id="",
-                    chunk_id=key,
-                    source=row["title"][:255],
-                    version=0,
-                    text=row["text"],
-                    page=None,
-                    start_index=0,
+            if web:
+                citation = Citation(
+                    kind=row["kind"], url=row["url"], retrieved_at=utc_now(), document_id="",
+                    version_id="", source=row["title"][:255], version=0, text=row["text"],
+                    page=None, start_index=0,
                 )
-            )
+            else:
+                match = course_chunks.get(key)
+                if match is None or match[1].id != row["document_id"]:
+                    continue
+                chunk, document, version = match
+                citation = Citation(
+                    document_id=document.id, version_id=version.id, source=version.filename,
+                    version=version.number, text=chunk.text, page=chunk.page, start_index=chunk.start_index,
+                )
+            seen.add(key)
+            citation.run_id, citation.number, citation.chunk_id = run_id, len(seen), key
+            new.append(citation)
+        if (
+            len(seen) > MAX_SOURCES
+            or sum(len(item.text) for item in existing + new) > MAX_EVIDENCE_CHARS
+        ):
+            raise BudgetExceeded()
+        session.add_all(new)
         session.flush()
         sources = citations_for_run(session, run_id)
         event(session, run_id, "citations", {"citations": sources})
         session.commit()
-        return sources
+        return sources, [row for row in sources if row["chunk_id"] in wanted]
 
 
 def append(run_id, text):
@@ -231,6 +196,18 @@ def unregistered_citations(text, known):
     """返回正文中没有登记的引用编号。"""
     references = {int(number) for number in re.findall(r"(?<![\w])\[(\d{1,4})\]", text)}
     return sorted(references - known)
+
+
+def mark_cancelling(run_id):
+    """保存取消中状态及对应事件，运行已结束时返回 False。"""
+    with catalog_lock, SessionLocal() as session:
+        run = session.get(Run, run_id)
+        if run is None or run.status not in ACTIVE:
+            return False
+        run.status, run.phase = "cancelling", "正在停止"
+        event(session, run_id, "status", {"status": run.status, "phase": run.phase})
+        session.commit()
+        return True
 
 
 def finish(run_id, state, error="", *, agent_checkpoint_id=None):

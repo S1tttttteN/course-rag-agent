@@ -10,10 +10,11 @@ from sqlalchemy.orm import Session
 
 from app.core.config import MAX_UPLOAD_BYTES, UPLOAD_DIR
 from app.core.locks import catalog_lock
-from app.db.models import Chunk, CleanupJob, Course, Document, DocumentVersion, utc_now
+from app.db.models import Chunk, CleanupJob, Document, DocumentVersion, utc_now
+from app.db.session import SessionLocal
 from app.repositories.documents import documents_for_course, versions_for_document
 from app.retrieval.loader import SUPPORTED_EXTENSIONS, read_plain_text, validate_docx_archive
-from app.services.courses import CourseNotFound
+from app.services.courses import require_course
 from app.services.rich_preview import render_rich_preview
 
 
@@ -33,20 +34,6 @@ class DocumentError(Exception):
             status: 对应的 HTTP 状态码。
         """
         self.detail, self.status = detail, status
-
-
-def require_course(session: Session, course_id: str):
-    """确认课程仍存在于目录中。
-
-    Args:
-        session: 用于当前操作的 SQLAlchemy 会话。
-        course_id: 课程 ID。
-
-    Raises:
-        CourseNotFound: 指定课程不存在。
-    """
-    if session.get(Course, course_id) is None:
-        raise CourseNotFound(course_id)
 
 
 def require_document(session: Session, course_id: str, document_id: str):
@@ -424,7 +411,8 @@ def remove(session: Session, course_id: str, document_id: str):
 
 
 def preview(
-    session: Session, course_id: str, document_id: str, offset: int, limit: int
+    session: Session, course_id: str, document_id: str, offset: int, limit: int,
+    *, expected_version_id: str | None = None,
 ):
     """按片段顺序分页读取可用版本的原文。
 
@@ -434,15 +422,18 @@ def preview(
         document_id: 资料 ID。
         offset: 结果起始偏移量。
         limit: 最多返回的条数。
+        expected_version_id: 已知的可用版本 ID，用于拒绝过期的分页请求。
 
     Returns:
         包含来源文件名、版本号、总片段数、偏移量和当前页片段的字典。
 
     Raises:
         CourseNotFound: 指定课程不存在。
-        DocumentError: 资料归属不符或没有可用版本。
+        DocumentError: 资料归属不符、可用版本不存在或已变化。
     """
     document = require_document(session, course_id, document_id)
+    if expected_version_id is not None and document.active_version_id != expected_version_id:
+        raise DocumentError("资料版本已变化，请重新查阅目录。", 409)
     if not document.active_version_id:
         raise DocumentError("这份资料还没有可用版本，请等待处理完成或重试。", 409)
     version = session.get(DocumentVersion, document.active_version_id)
@@ -470,3 +461,36 @@ def preview(
             for chunk in chunks
         ],
     }
+
+
+def read_version_page(course_id, document_id, version_id, offset, limit):
+    """使用独立数据库会话读取指定可用版本的一页片段。"""
+    with SessionLocal() as session:
+        return preview(session, course_id, document_id, offset, limit, expected_version_id=version_id)
+
+
+def catalog(course_id, offset):
+    """按创建顺序列出一页资料及其可读状态。"""
+    with SessionLocal() as session:
+        require_course(session, course_id)
+        rows = session.execute(
+            select(Document, DocumentVersion)
+            .outerjoin(DocumentVersion, Document.active_version_id == DocumentVersion.id)
+            .where(Document.course_id == course_id)
+            .order_by(Document.created_at, Document.id)
+            .offset(offset)
+            .limit(11)
+        ).all()
+        return {
+            "documents": [
+                {
+                    "document_id": document.id,
+                    "name": document.name,
+                    "version_id": version.id if version else None,
+                    "chunks": version.chunk_count if version else 0,
+                    "readable": bool(version and version.status == "ready"),
+                }
+                for document, version in rows[:10]
+            ],
+            "next_offset": offset + 10 if len(rows) > 10 else None,
+        }

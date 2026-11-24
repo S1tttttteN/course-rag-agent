@@ -8,7 +8,6 @@ from uuid import uuid4
 from langchain.agents.middleware import wrap_tool_call
 from langchain_core.messages import ToolMessage
 
-from app.qa.tools import BudgetExceeded
 from app.services import runs
 
 MAX_CALLS = 8
@@ -33,7 +32,7 @@ async def manage_tool_call(request, handler):
     context = request.runtime.context
     async with context.lock:
         if context.calls >= MAX_CALLS:
-            raise BudgetExceeded()
+            raise runs.BudgetExceeded()
         context.calls += 1
         call = request.tool_call
         name = call["name"]
@@ -91,7 +90,7 @@ async def manage_tool_call(request, handler):
         except asyncio.CancelledError:
             record.update(status="interrupted", summary="执行已中断。")
             raise
-        except BudgetExceeded:
+        except runs.BudgetExceeded:
             record.update(status="limited", summary="已达到本轮资料阅读预算。")
             raise
         except Exception as error:

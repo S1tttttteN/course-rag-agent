@@ -33,17 +33,6 @@ class CourseRepository:
             )
         )
 
-    def get(self, course_id: str) -> Course | None:
-        """按 ID 查找课程。
-
-        Args:
-            course_id: 课程 ID。
-
-        Returns:
-            匹配的课程记录，或不存在时的 None。
-        """
-        return self.session.get(Course, course_id)
-
     def save(self, course: Course) -> Course:
         """提交并刷新课程记录。
 

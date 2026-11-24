@@ -1,6 +1,7 @@
 """管理课程目录及课程删除后的存储清理。"""
 
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.db.models import CleanupJob, Conversation, Course
 from app.core.locks import catalog_lock
@@ -11,6 +12,25 @@ class CourseNotFound(Exception):
     """请求的课程不存在时抛出的业务异常。"""
 
     pass
+
+
+def require_course(session: Session, course_id: str):
+    """读取仍存在于目录中的课程。
+
+    Args:
+        session: 用于当前操作的 SQLAlchemy 会话。
+        course_id: 课程 ID。
+
+    Returns:
+        课程记录。
+
+    Raises:
+        CourseNotFound: 指定课程不存在。
+    """
+    course = session.get(Course, course_id)
+    if course is None:
+        raise CourseNotFound(course_id)
+    return course
 
 
 class CourseService:
@@ -48,10 +68,7 @@ class CourseService:
         Raises:
             CourseNotFound: 指定课程不存在。
         """
-        course = self.repository.get(course_id)
-        if course is None:
-            raise CourseNotFound(course_id)
-        return course
+        return require_course(self.repository.session, course_id)
 
     def create(self, name: str, description: str):
         """创建并保存一门课程。

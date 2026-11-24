@@ -41,6 +41,19 @@ def close():
             _client = None
 
 
+def _course_prefix(course_id: str):
+    """生成课程下所有向量集合共用的前缀。"""
+    return f"course_{course_id.replace('-', '')}_"
+
+
+def _collection_names(prefix: str):
+    """枚举具有指定前缀的集合名称。"""
+    for item in client().list_collections():
+        name = item.name if hasattr(item, "name") else item
+        if name.startswith(prefix):
+            yield name
+
+
 def collection_name(course_id: str, profile: str):
     """计算课程和嵌入配置对应的向量集合名。
 
@@ -51,7 +64,7 @@ def collection_name(course_id: str, profile: str):
     Returns:
         以课程 ID 和配置摘要构成的集合名。
     """
-    return f"course_{course_id.replace('-', '')}_{hashlib.sha256(profile.encode()).hexdigest()[:12]}"
+    return _course_prefix(course_id) + hashlib.sha256(profile.encode()).hexdigest()[:12]
 
 
 def collection(course_id: str, profile: str):
@@ -76,16 +89,23 @@ def remove_document(course_id: str, document_id: str | None):
         course_id: 课程 ID。
         document_id: 待删除的资料 ID，为 None 时删除课程的全部向量集合。
     """
-    prefix = f"course_{course_id.replace('-', '')}_"
-    for item in client().list_collections():
-        name = item.name if hasattr(item, "name") else item
-        if name.startswith(prefix):
-            if document_id is None:
-                client().delete_collection(name)
-            else:
-                client().get_collection(name, embedding_function=None).delete(
-                    where={"document_id": document_id}
-                )
+    for name in _collection_names(_course_prefix(course_id)):
+        if document_id is None:
+            client().delete_collection(name)
+        else:
+            client().get_collection(name, embedding_function=None).delete(
+                where={"document_id": document_id}
+            )
+
+
+def remove_retired_versions(course_id: str, document_id: str, active_version_id: str):
+    """回收指定资料的旧向量，保留刚发布的版本。"""
+    where = {"$and": [
+        {"document_id": document_id},
+        {"version_id": {"$ne": active_version_id}},
+    ]}
+    for name in _collection_names(_course_prefix(course_id)):
+        client().get_collection(name, embedding_function=None).delete(where=where)
 
 
 def reconcile(active_versions: set[str]):
@@ -94,10 +114,7 @@ def reconcile(active_versions: set[str]):
     Args:
         active_versions: 应保留向量的可用版本 ID 集合。
     """
-    for item in client().list_collections():
-        name = item.name if hasattr(item, "name") else item
-        if not name.startswith("course_"):
-            continue
+    for name in _collection_names("course_"):
         store = client().get_collection(name, embedding_function=None)
         records = store.get(include=["metadatas"])
         stale = [

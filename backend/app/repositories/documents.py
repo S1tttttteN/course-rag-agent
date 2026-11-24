@@ -25,25 +25,41 @@ def documents_for_course(session: Session, course_id: str):
     )
 
 
-def active_chunks(session: Session, course_id: str):
-    """查询当前课程已发布版本的片段，供关键词检索和向量候选复核使用。
+def _active_chunks_query(course_id: str):
+    """构造限制在当前课程可用版本的片段查询。"""
+    return (
+        select(Chunk, Document, DocumentVersion)
+        .join(DocumentVersion, Chunk.version_id == DocumentVersion.id)
+        .join(Document, Document.active_version_id == DocumentVersion.id)
+        .where(
+            Document.course_id == course_id,
+            DocumentVersion.document_id == Document.id,
+            DocumentVersion.status == "ready",
+        )
+    )
+
+
+def active_chunks(session: Session, course_id: str, *, chunk_ids=None):
+    """读取当前课程的可用片段，支持按候选 ID 批量查询。
 
     Args:
-        session: 用于当前操作的 SQLAlchemy 会话。
+        session: 当前数据库会话。
         course_id: 课程 ID。
+        chunk_ids: 指定时只查询该批片段。
 
     Returns:
-        按资料 ID 和片段顺序排列的结果，每行包含片段、资料及版本。
+        按资料 ID 和片段顺序排列的片段、资料与版本记录。
     """
-    return list(
-        session.execute(
-            select(Chunk, Document, DocumentVersion)
-            .join(DocumentVersion, Chunk.version_id == DocumentVersion.id)
-            .join(Document, Document.active_version_id == DocumentVersion.id)
-            .where(Document.course_id == course_id, DocumentVersion.status == "ready")
-            .order_by(Document.id, Chunk.ordinal)
-        ).all()
-    )
+    query = _active_chunks_query(course_id)
+    if chunk_ids is not None:
+        query = query.where(Chunk.id.in_(chunk_ids))
+    return session.execute(query.order_by(Document.id, Chunk.ordinal)).all()
+
+
+def active_chunk_ids(session: Session, course_id: str, chunk_ids):
+    """只取本批候选中仍属于当前课程可用版本的 ID。"""
+    query = _active_chunks_query(course_id).with_only_columns(Chunk.id)
+    return set(session.scalars(query.where(Chunk.id.in_(chunk_ids))))
 
 
 def versions_for_document(session: Session, document_id: str):

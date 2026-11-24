@@ -229,7 +229,7 @@ async def create_run(
     Args:
         course_id: 课程 ID。
         conversation_id: 接收提问的对话 ID。
-        body: 包含问题和检索选项的请求体。
+        body: 包含问题和本轮联网许可的请求体。
         request: 用于检查任务容量和启动后台任务的 HTTP 请求。
         session: 用于保存运行、消息和初始事件的数据库会话。
 
@@ -241,20 +241,9 @@ async def create_run(
         conversations.ConversationError: 对话不存在或不属于指定课程（404）、
             对话已有活动运行（409），或后台任务数已达 6 个（429）。
     """
-    manager = request.app.state.runs
-    async with manager.submission_lock:
-        if len(manager.tasks) >= 6:
-            raise conversations.ConversationError("等待中的回答较多，请稍后再试。", 429)
-        result = conversations.create_run(
-            session,
-            str(course_id),
-            str(conversation_id),
-            body.question,
-            web_search=body.web_search,
-        )
-        # 运行记录提交后再启动任务，前端可用返回的 ID 单独订阅进度。
-        manager.start(result["id"])
-    return result
+    return await request.app.state.runs.submit(
+        session, str(course_id), str(conversation_id), body.question, web_search=body.web_search,
+    )
 
 
 @router.post(

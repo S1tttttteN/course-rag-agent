@@ -8,10 +8,10 @@ from rank_bm25 import BM25Okapi
 
 from app.core.models import TOP_K, embedding_profile, get_embeddings
 from app.db.session import SessionLocal
-from app.repositories.documents import active_chunks
+from app.repositories.documents import active_chunk_ids, active_chunks
 from app.retrieval import index
 from app.retrieval.reranker import is_available, rerank_documents
-from app.services.documents import require_course
+from app.services.courses import require_course
 
 
 def tokenize(text: str):
@@ -208,7 +208,7 @@ def finish_search(course_id, query, ranked, trace, top_k, rerank):
     # 向量召回和重排期间资料可能被删除或替换，返回前重新确认片段仍属于可用版本。
     with SessionLocal() as session:
         require_course(session, course_id)
-        allowed = {chunk.id for chunk, _, _ in active_chunks(session, course_id)}
+        allowed = active_chunk_ids(session, course_id, [row["id"] for row in ranked])
     return {
         "results": [row for row in ranked if row["id"] in allowed][:top_k],
         "trace": trace,

@@ -150,6 +150,14 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(stopped['status'], 'cancelled')
         self.assertEqual(stopped['content'], partial['content'])
 
+    def test_submit_refuses_full_queue_before_creating_run(self):
+        """达到容量时返回 429，且不创建消息或 Run。"""
+        manager = self.client.app.state.runs
+        with patch.dict(manager.tasks, {str(number): None for number in range(6)}):
+            response = self.client.post(f'{self.path}/runs', json={'question': '队列已满'})
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(self.client.get(self.path).json()['messages'], [])
+
     def test_cross_course_access_to_conversation_run_and_citation_is_rejected(self):
         """验证对话、运行及引用接口都会校验课程归属。"""
         with patch('app.qa.agent.get_llm', return_value=course_model()):
@@ -201,10 +209,37 @@ class ConversationTests(unittest.TestCase):
             foreign_chunk = session.scalar(select(Chunk).where(Chunk.version_id == foreign['latest']['id']))
             run = conversations.create_run(session, self.course, self.conversation, '注册依据')
             records = [{'id': own_chunk.id, 'document_id': self.document['id']}, {'id': foreign_chunk.id, 'document_id': foreign['id']}]
-        sources = runs.snapshot(run['id'], records + records)
+        sources, matched = runs.snapshot(run['id'], records + records)
+        self.assertEqual(matched, sources)
         self.assertEqual([item['number'] for item in sources], [1])
-        self.assertEqual(runs.snapshot(run['id'], records)[0]['id'], sources[0]['id'])
+        self.assertEqual(runs.snapshot(run['id'], records)[1][0]['id'], sources[0]['id'])
         runs.finish(run['id'], 'completed')
+
+    def test_web_budget_counts_only_new_sources_and_rejects_batch_atomically(self):
+        """网络来源先去重，真正超限时不写入任何一条候选。"""
+        with SessionLocal() as session:
+            run_id = conversations.create_run(session, self.course, self.conversation, '网页依据')['id']
+
+        def source(number, size, kind='web_page'):
+            """构造指定 URL、类型和长度的测试来源。"""
+            return {'url': f'https://example.org/{number}', 'kind': kind, 'title': '来源', 'text': 'x' * size}
+
+        initial = [source(number, size) for number, size in enumerate((4000, 4000, 4000, 4000, 600))]
+        sources, _ = runs.snapshot(run_id, initial, web=True)
+        repeated, matched = runs.snapshot(run_id, [initial[0], initial[0]], web=True)
+        self.assertEqual(repeated, sources)
+        self.assertEqual([row['id'] for row in matched], [sources[0]['id']])
+
+        snippet = source(0, 2000, 'web_snippet')
+        extended, matched = runs.snapshot(run_id, [snippet, snippet], web=True)
+        self.assertEqual([row['number'] for row in matched], [6])
+        self.assertEqual(matched[0]['url'], sources[0]['url'])
+        self.assertEqual(matched[0]['kind'], 'web_snippet')
+
+        with self.assertRaises(runs.BudgetExceeded):
+            runs.snapshot(run_id, [source(6, 1000), source(7, 1000)], web=True)
+        with SessionLocal() as session:
+            self.assertEqual(conversations.citations_for_run(session, run_id), extended)
 
     def test_service_shutdown_preserves_partial_as_interrupted(self):
         """验证服务停止后已发布内容仍可作为中断记录读取。"""

@@ -316,24 +316,3 @@ def get_active_models() -> dict:
         "embedding_provider": EMBEDDING_PROVIDER,
         "embedding_model": EMBEDDING_MODEL or embed_conf.get("default_model", "未知"),
     }
-
-
-def missing_api_keys() -> list[str]:
-    """检查已选对话和嵌入服务商的密钥。
-
-    Returns:
-        缺失密钥的配置提示列表。
-    """
-    problems = []
-    for kind, name, registry in (
-        ("对话模型", CHAT_PROVIDER, CHAT_PROVIDERS),
-        ("嵌入模型", EMBEDDING_PROVIDER, EMBEDDING_PROVIDERS),
-    ):
-        conf = registry.get(name)
-        if not conf or not conf["key_env"]:
-            continue
-        key_value = os.getenv(conf["key_env"], "").strip()
-        # 空值或仍是模板占位符都视为未配置
-        if not key_value or "你的" in key_value:
-            problems.append(f"{kind}（{name}）：请在 .env 中填入 {conf['key_env']}")
-    return problems

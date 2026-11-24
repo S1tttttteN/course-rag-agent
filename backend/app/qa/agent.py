@@ -12,7 +12,6 @@ from app.qa.metrics import RunUsage
 from app.qa.messages import ANSWER_CHAR_LIMIT, answer_messages, output_was_truncated, text_content
 from app.qa import tool_middleware
 from app.qa.tools import (
-    BudgetExceeded,
     CourseToolContext,
     list_documents,
     read_document,
@@ -128,7 +127,7 @@ async def execute_agent(
                             if not runs.append(run_id, final_answer):
                                 return
                     streamed = False
-    except (BudgetExceeded, GraphRecursionError):
+    except (runs.BudgetExceeded, GraphRecursionError):
         # 工具循环已达到上限，交给同一模型整理现有材料。
         if not runs.status(run_id, "已达查阅上限，正在整理已有依据"):
             return

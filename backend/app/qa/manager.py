@@ -6,7 +6,6 @@ from traceback import extract_tb, format_list
 
 from sqlalchemy import select
 
-from app.core.locks import catalog_lock
 from app.core.models import RUN_TIMEOUT
 from app.db.models import Conversation, Run
 from app.db.session import SessionLocal
@@ -14,7 +13,7 @@ from app.qa.agent import AnswerLimit, execute_agent
 from app.qa.history import load_history, recent_history
 from app.retrieval.search import search_course_material
 from app.services import runs
-from app.services.conversations import ACTIVE, event
+from app.services.conversations import ACTIVE, ConversationError, create_run
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +39,31 @@ class RunManager:
         self.semaphore = asyncio.Semaphore(1 if CHAT_PROVIDER == "ollama" else 2)
         self.closing = False
 
-    def start(self, run_id):
+    async def submit(self, session, course_id, conversation_id, question, *, web_search=False):
+        """在提交锁内检查队列容量，保存问答后启动任务。
+
+        Args:
+            session: 用于创建运行的请求级数据库会话。
+            course_id: 当前课程 ID。
+            conversation_id: 接收问题的对话 ID。
+            question: 用户提交的问题。
+            web_search: 本轮是否允许联网。
+
+        Returns:
+            已持久化的运行摘要。
+
+        Raises:
+            ConversationError: 队列已满、对话不匹配或该对话已有活动问答。
+            CourseNotFound: 指定课程不存在。
+        """
+        async with self.submission_lock:
+            if len(self.tasks) >= 6:
+                raise ConversationError("等待中的回答较多，请稍后再试。", 429)
+            run = create_run(session, course_id, conversation_id, question, web_search=web_search)
+            self._start(run["id"])
+        return run
+
+    def _start(self, run_id):
         """为已持久化的运行创建异步任务，并在结束时清理任务登记。
 
         Args:
@@ -174,15 +197,8 @@ class RunManager:
         Args:
             run_id: 问答运行 ID。
         """
-        with catalog_lock, SessionLocal() as session:
-            run = session.get(Run, run_id)
-            if run is None or run.status not in ACTIVE:
-                return
-            run.status, run.phase = "cancelling", "正在停止"
-            event(
-                session, run_id, "status", {"status": "cancelling", "phase": "正在停止"}
-            )
-            session.commit()
+        if not runs.mark_cancelling(run_id):
+            return
         task = self.tasks.get(run_id)
         if task:
             task.cancel()

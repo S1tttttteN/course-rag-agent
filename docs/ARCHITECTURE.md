@@ -18,6 +18,68 @@ flowchart TD
     A --> M[配置的模型服务]
 ```
 
+## 从上传资料到多轮问答
+
+```mermaid
+flowchart TD
+    subgraph INDEX[资料入库]
+        Upload[上传资料，创建待处理版本] --> BuildIndex[后台解析、切片并写入向量]
+        BuildIndex --> Ready{索引是否完整？}
+        Ready -->|成功| Publish[保存片段并发布可检索版本]
+        Ready -->|失败| Keep[记录失败，已有版本继续可查]
+    end
+
+    subgraph QA[问答与工具循环]
+        Ask[提交问题和本轮联网许可] --> Run[创建 Run 和消息，启动后台任务]
+        Run --> History[加载已完成历史，按需摘要]
+        History --> Agent[create_agent 装配模型、工具和中间件]
+        Agent --> Decide{模型下一步做什么？}
+        Decide -->|继续查阅| Budget{工具预算是否充足？}
+        Budget -->|充足| Tools{调用哪个工具？}
+        Tools --> Search[课程搜索：BM25、向量召回、RRF 和可选重排]
+        Tools --> Catalog[列出课程资料]
+        Tools --> Read[按资料版本分页阅读]
+        Tools --> Web[搜索或阅读公开网页，仅本轮允许联网时提供]
+        Publish -.->|提供可用片段| Search
+        Publish -.->|提供可用版本| Read
+        Search --> Sources{新来源是否在引用预算内？}
+        Read --> Sources
+        Web --> Sources
+        Sources -->|是| Snapshot[保存引用快照，重复来源复用编号]
+        Snapshot --> Result[将工具结果交回模型]
+        Catalog --> Result
+        Result --> Decide
+        Sources -->|否| Fallback[用已登记的来源做无工具总结]
+        Budget -->|耗尽| Fallback
+        Decide -->|开始回答| Answer[流式生成回答]
+        Fallback --> Answer
+    end
+
+    subgraph OUTPUT[流式显示、结束与续聊]
+        Events[保存工具进度、引用、正文增量和结束事件]
+        SSE[浏览器通过 SSE 更新，断线后按事件 ID 续接]
+        Complete[提交成功终态及可用检查点 ID]
+        Stop[提交取消或失败终态，保留已发布内容]
+        Next[用户继续追问]
+
+        Tools -.->|查阅进度| Events
+        Snapshot -.->|引用更新| Events
+        Answer -.->|正文增量| Events
+        Events --> SSE
+        Answer -->|成功| Complete
+        Run -.->|取消或执行失败| Stop
+        Complete -.->|结束事件| Events
+        Stop -.->|结束事件| Events
+        Complete --> Next
+        Stop --> Next
+        Next --> Ask
+    end
+```
+
+默认 Top K 为 4，限制单次课程搜索返回的片段数。一次问答可多次搜索和阅读，引用面板展示本轮累计登记的来源。
+
+下一轮从最近一次成功提交的检查点继续，并从业务库补入此后已完成的问答。缺少可用检查点时，从业务库加载最近的已完成问答。取消或失败的回答可在页面回看，后续模型上下文只使用已完成的问答。参见[对话、引用与流式运行](CONVERSATIONS.md)。
+
 ## 职责
 
 | 目录 | 职责 |

@@ -19,14 +19,14 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from sqlalchemy import select
 
 from test_courses import app
-from app.retrieval.search import search, search_course_material
+from app.retrieval.search import finish_search, rank_candidates, search, search_course_material
 from app.core.config import UPLOAD_DIR
 from app.db.models import CleanupJob, DocumentVersion
 from app.db.session import SessionLocal
-from app.jobs.indexing import cleanup_job, process_version, recover
+from app.jobs.indexing import IndexWorker, cleanup_job, process_version, recover
 from app.retrieval import index
 from app.retrieval.loader import load_and_split
-from app.services.documents import raw_path
+from app.services.documents import DocumentError, raw_path, read_version_page
 
 
 class FakeEmbeddings:
@@ -172,6 +172,29 @@ class DocumentTests(unittest.TestCase):
         self.assertEqual(published['id'], original['id'])
         self.assertEqual(search(self.course, '进程', semantic=False)['results'], [])
         self.assertEqual(index.collection(self.course, 'test:3').count(), published['chunk_count'])
+
+    def test_returned_candidates_and_version_reads_follow_active_version(self):
+        """候选召回后发生替换时，旧片段和旧版本的分页请求均不可继续使用。"""
+        original = self.process(self.upload())
+        sibling = self.process(self.upload('进程拥有自己的地址空间。', '补充.md'))
+        ranked, trace = rank_candidates(self.course, '进程', semantic=False)
+        self.assertEqual(
+            {row['document_id'] for row in ranked}, {original['id'], sibling['id']},
+        )
+
+        replacement = self.client.put(
+            f"{self.prefix}/{original['id']}/file",
+            files={'file': ('新版.md', '进程是程序的执行实例。'.encode())},
+        ).json()
+        self.process(replacement)
+
+        result = finish_search(self.course, '进程', ranked, trace, top_k=4, rerank=False)
+        self.assertEqual([row['document_id'] for row in result['results']], [sibling['id']])
+        with self.assertRaises(DocumentError) as error:
+            read_version_page(self.course, original['id'], original['latest']['id'], 0, 4)
+        self.assertEqual(error.exception.status, 409)
+        page = read_version_page(self.course, original['id'], replacement['latest']['id'], 0, 4)
+        self.assertIn('执行实例', page['chunks'][0]['text'])
 
     def test_pdf_original_enforces_ownership_and_survives_cross_format_replacement(self):
         """验证 PDF 原件可按版本读取，且不跨课程、资料或删除边界。"""
@@ -576,6 +599,34 @@ class ParserTests(unittest.TestCase):
 
 class WorkerTests(unittest.TestCase):
     """验证资料索引后台线程的自动处理。"""
+
+    def test_stop_wakes_idle_index_worker(self):
+        """停止信号唤醒空闲的索引线程。"""
+        worker = IndexWorker()
+        waiting = Event()
+        wait_for_stop = worker.stopped.wait
+
+        def wait(timeout):
+            """标记线程进入轮询等待，再等待停止信号。"""
+            waiting.set()
+            return wait_for_stop(timeout)
+
+        with (
+            patch('app.jobs.indexing.recover'),
+            patch('app.jobs.indexing.SessionLocal') as session,
+            patch.object(worker.stopped, 'wait', side_effect=wait) as wait_call,
+        ):
+            database = session.return_value.__enter__.return_value
+            database.scalars.return_value = []
+            database.scalar.return_value = None
+            worker.start()
+            try:
+                self.assertTrue(waiting.wait(3))
+            finally:
+                worker.stop()
+                worker.thread.join(timeout=3)
+            self.assertFalse(worker.thread.is_alive())
+            wait_call.assert_called_once_with(2)
 
     def test_upload_is_processed_by_background_worker(self):
         """验证上传资料会被运行中的索引线程自动发布。"""

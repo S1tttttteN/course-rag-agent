@@ -8,26 +8,14 @@ from typing import Annotated, Any
 from langchain.tools import ToolRuntime, tool
 from langchain_core.tools import InjectedToolArg
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
 
-from app.db.models import Document, DocumentVersion
-from app.db.session import SessionLocal
 from app.retrieval.web import (
     search_web as web_search,
     read_webpage as web_read,
     public_url,
 )
 from app.services import runs
-from app.services.documents import preview, require_course, require_document
-
-MAX_EVIDENCE_CHARS = 20000
-MAX_SOURCES = 24
-
-
-class BudgetExceeded(Exception):
-    """工具调用数或引用容量耗尽时抛出的异常。"""
-
-    pass
+from app.services.documents import catalog, read_version_page
 
 
 class RuntimeToolInput(BaseModel):
@@ -100,83 +88,6 @@ class ReadInput(RuntimeToolInput):
     )
 
 
-def catalog(course_id, offset):
-    """分页查询课程资料并标记各版本的可读状态。
-
-    Args:
-        course_id: 课程 ID。
-        offset: 结果起始偏移量。
-
-    Returns:
-        最多 10 条目录记录及可选的下一页偏移量。
-
-    Raises:
-        CourseNotFound: 指定课程不存在。
-    """
-    with SessionLocal() as session:
-        require_course(session, course_id)
-        rows = list(
-            session.scalars(
-                select(Document)
-                .where(Document.course_id == course_id)
-                .order_by(Document.created_at, Document.id)
-                .offset(offset)
-                .limit(11)
-            )
-        )
-        items = []
-        for document in rows[:10]:
-            version = (
-                session.get(DocumentVersion, document.active_version_id)
-                if document.active_version_id
-                else None
-            )
-            items.append(
-                {
-                    "document_id": document.id,
-                    "name": document.name,
-                    "version_id": version.id if version else None,
-                    "chunks": version.chunk_count if version else 0,
-                    "readable": bool(version and version.status == "ready"),
-                }
-            )
-        return {
-            "documents": items,
-            "next_offset": offset + 10 if len(rows) > 10 else None,
-        }
-
-
-def read_records(course_id, document_id, version_id, offset, limit):
-    """读取指定可用版本的一页连续片段。
-
-    Args:
-        course_id: 课程 ID。
-        document_id: 资料 ID。
-        version_id: 资料版本 ID。
-        offset: 结果起始偏移量。
-        limit: 最多返回的条数。
-
-    Returns:
-        片段记录、可选的下一页偏移量及总片段数。
-
-    Raises:
-        CourseNotFound: 指定课程不存在。
-        DocumentError: 资料不存在或归属不符，或没有可预览版本。
-        ValueError: 指定版本已非当前可用版本。
-    """
-    with SessionLocal() as session:
-        document = require_document(session, course_id, document_id)
-        if document.active_version_id != version_id:
-            raise ValueError("version changed")
-        result = preview(session, course_id, document_id, offset, limit)
-        records = [
-            {**chunk, "document_id": document_id, "version_id": version_id}
-            for chunk in result["chunks"]
-        ]
-        end = offset + len(records)
-        return records, end if end < result["total"] else None, result["total"]
-
-
 @dataclass
 class CourseToolContext:
     """保存本轮工具配置、共享状态和已登记引用。
@@ -204,76 +115,14 @@ class CourseToolContext:
         self.catalog_items = {}
         self.web_urls = set()
 
-    def register(self, records):
-        """保存课程原文快照并为当前候选提供引用编号。
-
-        Args:
-            records: 由课程检索或阅读工具取得的片段记录。
-
-        Returns:
-            本次候选中成功登记的引用及对应原文。
-
-        Raises:
-            BudgetExceeded: 新增候选将超过引用条数或原文字数预算。
-        """
-        fresh = {row["id"]: row for row in records if row["id"] not in self.sources}
-        if len(self.sources) + len(fresh) > MAX_SOURCES:
-            raise BudgetExceeded()
-        # Use authoritative snapshot text, not model-supplied text. New records come from trusted tools.
-        if (
-            sum(len(row["text"]) for row in self.sources.values())
-            + sum(len(row["text"]) for row in fresh.values())
-            > MAX_EVIDENCE_CHARS
-        ):
-            raise BudgetExceeded()
-        registered = runs.snapshot(self.run_id, records)
-        self.sources = {row["chunk_id"]: row for row in registered}
-        wanted = {row["id"] for row in records}
-        return [
-            {
-                key: row[key]
-                for key in (
-                    "number",
-                    "kind",
-                    "url",
-                    "document_id",
-                    "version_id",
-                    "source",
-                    "text",
-                    "page",
-                )
-            }
-            for row in registered
-            if row["chunk_id"] in wanted
-        ]
-
-    def register_web(self, records):
-        """保存网络来源快照并返回本次登记的引用。
-
-        Args:
-            records: 由网络搜索或网页阅读工具取得的来源记录。
-
-        Returns:
-            对应本批来源地址和类型的已登记引用。
-
-        Raises:
-            BudgetExceeded: 该批来源将超过引用条数或原文字数预算。
-        """
-        if (
-            len(self.sources) + len(records) > MAX_SOURCES
-            or sum(len(row["text"]) for row in self.sources.values())
-            + sum(len(row["text"]) for row in records)
-            > MAX_EVIDENCE_CHARS
-        ):
-            raise BudgetExceeded()
-        registered = runs.snapshot_web(self.run_id, records)
-        self.sources = {row["chunk_id"]: row for row in registered}
-        wanted = {(row["url"], row["kind"]) for row in records}
-        return [
-            {key: row[key] for key in ("number", "kind", "url", "source", "text")}
-            for row in registered
-            if (row["url"], row["kind"]) in wanted
-        ]
+    def register(self, records, *, web=False):
+        """保存来源快照并返回本批可供模型引用的字段。"""
+        sources, matched = runs.snapshot(self.run_id, records, web=web)
+        self.sources = {row["chunk_id"]: row for row in sources}
+        fields = ("number", "kind", "url", "source", "text")
+        if not web:
+            fields += ("document_id", "version_id", "page")
+        return [{key: row[key] for key in fields} for row in matched]
 
 
 @tool(args_schema=SearchInput)
@@ -339,19 +188,23 @@ async def read_document(
 
     Raises:
         CourseNotFound: 当前课程已不存在。
-        DocumentError: 资料不存在、归属不符或没有可预览版本。
-        ValueError: 指定版本已非当前可用版本。
+        DocumentError: 资料不存在、归属不符或版本已变化。
         BudgetExceeded: 片段超过本轮引用预算。
     """
     context = runtime.context
-    records, following, total = await context.manager.offload(
-        read_records, context.course_id, document_id, version_id, offset, limit
+    page = await context.manager.offload(
+        read_version_page, context.course_id, document_id, version_id, offset, limit
     )
+    records = [
+        {**chunk, "document_id": document_id, "version_id": version_id}
+        for chunk in page["chunks"]
+    ]
+    end = offset + len(records)
     return json.dumps(
         {
             "sources": context.register(records),
-            "next_offset": following,
-            "total_chunks": total,
+            "next_offset": end if end < page["total"] else None,
+            "total_chunks": page["total"],
         },
         ensure_ascii=False,
     )
@@ -375,7 +228,7 @@ async def search_web(query: str, runtime: ToolRuntime[CourseToolContext]) -> str
     context.web_urls.update(row["url"] for row in records)
     return json.dumps(
         {
-            "sources": context.register_web(records),
+            "sources": context.register(records, web=True),
             "note": "这些是搜索摘要；重要细节可继续read_webpage核对。",
         },
         ensure_ascii=False,
@@ -403,7 +256,7 @@ async def read_webpage(url: str, runtime: ToolRuntime[CourseToolContext]) -> str
     record = await context.manager.offload(web_read, normalized)
     return json.dumps(
         {
-            "sources": context.register_web([record]),
+            "sources": context.register([record], web=True),
             "note": "网页正文截取，非完整站点或全文。",
         },
         ensure_ascii=False,

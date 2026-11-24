@@ -143,42 +143,9 @@ def process_version(version_id: str, stopped: Event):
                 )
                 session.commit()
         step = "发布索引"
-        # 向量写齐后才切换可用版本，避免检索读到部分索引，也让替换失败时仍能使用旧版本。
-        with catalog_lock, SessionLocal() as session:
-            version = session.get(DocumentVersion, version_id)
-            document = session.get(Document, document_id)
-            if stopped.is_set() or version is None or document is None:
-                return
-            session.execute(delete(Chunk).where(Chunk.version_id == version_id))
-            session.add_all(
-                [
-                    Chunk(
-                        id=f"{version_id}:{position}",
-                        version_id=version_id,
-                        ordinal=position,
-                        text=chunk.page_content,
-                        page=chunk.metadata.get("page"),
-                        start_index=chunk.metadata.get("start_index", 0),
-                    )
-                    for position, chunk in enumerate(chunks)
-                ]
-            )
-            document.active_version_id, document.updated_at = version_id, utc_now()
-            version.status, version.step, version.error = "ready", "可用于检索", ""
-            session.commit()
-            published = True
-        # 切换后旧向量已不可见，可以在发布事务结束后回收。
-        for item in index.client().list_collections():
-            name = item.name if hasattr(item, "name") else item
-            if name.startswith(f"course_{course_id.replace('-', '')}_"):
-                index.client().get_collection(name, embedding_function=None).delete(
-                    where={
-                        "$and": [
-                            {"document_id": document_id},
-                            {"version_id": {"$ne": version_id}},
-                        ]
-                    }
-                )
+        published = _publish_version(version_id, document_id, chunks, stopped)
+        if published:
+            index.remove_retired_versions(course_id, document_id, version_id)
     except Exception as error:
         log.warning(
             "Indexing version %s failed during %s (%s)",
@@ -204,6 +171,31 @@ def process_version(version_id: str, stopped: Event):
                 log.warning(
                     "Unpublished vectors require startup reconciliation: %s", version_id
                 )
+
+
+def _publish_version(version_id: str, document_id: str, chunks, stopped: Event):
+    """原子保存片段并切换可查版本，停机或资料已删除时返回 False。"""
+    with catalog_lock, SessionLocal() as session:
+        version = session.get(DocumentVersion, version_id)
+        document = session.get(Document, document_id)
+        if stopped.is_set() or version is None or document is None:
+            return False
+        session.execute(delete(Chunk).where(Chunk.version_id == version_id))
+        session.add_all([
+            Chunk(
+                id=f"{version_id}:{position}",
+                version_id=version_id,
+                ordinal=position,
+                text=chunk.page_content,
+                page=chunk.metadata.get("page"),
+                start_index=chunk.metadata.get("start_index", 0),
+            )
+            for position, chunk in enumerate(chunks)
+        ])
+        document.active_version_id, document.updated_at = version_id, utc_now()
+        version.status, version.step, version.error = "ready", "可用于检索", ""
+        session.commit()
+        return True
 
 
 def cleanup_job(job_id: str):
@@ -271,14 +263,12 @@ class IndexWorker:
 
     Attributes:
         stopped: 工作线程的停止信号。
-        wake: 唤醒轮询线程的信号。
         thread: 执行校对、清理和索引的守护线程。
     """
 
     def __init__(self):
         """初始化后台线程和控制信号。"""
         self.stopped = Event()
-        self.wake = Event()
         self.thread = Thread(target=self.run, name="course-indexer", daemon=True)
 
     def start(self):
@@ -318,10 +308,8 @@ class IndexWorker:
                     continue
             except Exception:
                 log.exception("Index worker will retry after an unexpected failure")
-            self.wake.wait(2)
-            self.wake.clear()
+            self.stopped.wait(2)
 
     def stop(self):
         """发出停止信号并唤醒等待中的线程。"""
         self.stopped.set()
-        self.wake.set()

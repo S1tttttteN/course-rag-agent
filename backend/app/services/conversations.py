@@ -17,7 +17,7 @@ from app.db.models import (
     utc_now,
 )
 from app.repositories.conversations import conversation_messages, course_conversations
-from app.services.documents import require_course
+from app.services.courses import require_course
 
 ACTIVE = {"queued", "running", "cancelling"}
 
